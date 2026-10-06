@@ -36,6 +36,16 @@ python -m smartstock_pipeline.extract_products_materials --output /path/to/produ
 
 The command exports only `product_id`, `product_name`, `category`, `unit_price`, `reorder_level`, `status`, and `updated_at`, in that order, sorted by `product_id`. It verifies the required source columns, preserves source values without transformations, and writes the completed UTF-8 CSV atomically. A table with no rows produces a CSV containing the documented header and zero data rows; it does not invent sample records.
 
+## Inventory extraction
+
+Run the inventory extraction after loading the database environment variables:
+
+```sh
+python -m smartstock_pipeline.extract_inventory --output /path/to/inventory.csv
+```
+
+The command exports only `inventory_id`, `product_id`, `quantity_on_hand`, `reorder_level`, and `last_updated`, in that order, sorted by `inventory_id`. It verifies the required source columns, preserves source values without transformations, and writes the completed UTF-8 CSV atomically. An empty source table produces a header-only CSV; it does not invent sample records.
+
 Run the unit tests with:
 
 ```sh

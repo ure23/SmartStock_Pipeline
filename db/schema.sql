@@ -26,14 +26,14 @@ CREATE TABLE IF NOT EXISTS orders (
     customer_id INTEGER,
     order_date DATE,
     status VARCHAR(30),
-    total_amount DECIMAL(12, 2)
+    total_amount NUMERIC
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
     order_item_id INTEGER PRIMARY KEY,
     order_id INTEGER REFERENCES orders (order_id),
     product_id INTEGER REFERENCES products_materials (product_id),
-    quantity INTEGER,
+    quantity NUMERIC,
     unit_price DECIMAL(12, 2)
 );
 

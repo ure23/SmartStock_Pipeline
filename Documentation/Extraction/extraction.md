@@ -125,7 +125,7 @@ The `orders` table contains customer order and transaction information.
 | `customer_id` | INT | Foreign Key | Identifies the related customer |
 | `order_date` | DATE | — | Date the order was placed |
 | `status` | VARCHAR(30) | — | Current order status |
-| `total_amount` | DECIMAL(12,2) | — | Total order amount |
+| `total_amount` | NUMERIC | — | Total order amount |
 
 **Reason for inclusion:** Order records are required for monthly sales and transaction analysis.
 
@@ -140,7 +140,7 @@ The `order_items` table contains the individual products/materials included in e
 | `order_item_id` | INT | Primary Key | Unique order item identifier |
 | `order_id` | INT | Foreign Key → orders(order_id) | Identifies the related order |
 | `product_id` | INT | Foreign Key → products_materials(product_id) | Identifies the related product/material |
-| `quantity` | INT | — | Quantity ordered |
+| `quantity` | NUMERIC | — | Quantity ordered |
 | `unit_price` | DECIMAL(12,2) | — | Unit price |
 
 **Reason for inclusion:** Order item records are required to analyze product-level transaction quantities and support demand forecasting.
@@ -248,8 +248,8 @@ The extraction data contract defines the expected source tables, fields, data ty
 |---|---|---|---|
 | `products_materials` | `product_id`, `product_name`, `category`, `unit_price`, `reorder_level`, `status`, `updated_at` | INT, VARCHAR(150), VARCHAR(100), DECIMAL(12,2), INT, VARCHAR(30), TIMESTAMP | `product_id` — Primary Key |
 | `inventory` | `inventory_id`, `product_id`, `quantity_on_hand`, `reorder_level`, `last_updated` | INT, INT, INT, INT, TIMESTAMP | `inventory_id` — Primary Key; `product_id` — Foreign Key referencing `products_materials.product_id` |
-| `orders` | `order_id`, `customer_id`, `order_date`, `status`, `total_amount` | INT, INT, DATE, VARCHAR(30), DECIMAL(12,2) | `order_id` — Primary Key; `customer_id` — Related Identifier |
-| `order_items` | `order_item_id`, `order_id`, `product_id`, `quantity`, `unit_price` | INT, INT, INT, INT, DECIMAL(12,2) | `order_item_id` — Primary Key; `order_id` — Foreign Key referencing `orders.order_id`; `product_id` — Foreign Key referencing `products_materials.product_id` |
+| `orders` | `order_id`, `customer_id`, `order_date`, `status`, `total_amount` | INT, INT, DATE, VARCHAR(30), NUMERIC | `order_id` — Primary Key; `customer_id` — Related Identifier |
+| `order_items` | `order_item_id`, `order_id`, `product_id`, `quantity`, `unit_price` | INT, INT, INT, NUMERIC, DECIMAL(12,2) | `order_item_id` — Primary Key; `order_id` — Foreign Key referencing `orders.order_id`; `product_id` — Foreign Key referencing `products_materials.product_id` |
 | `stock_movements` | `movement_id`, `product_id`, `movement_type`, `quantity`, `movement_date`, `reference_id` | INT, INT, VARCHAR(30), INT, TIMESTAMP, INT | `movement_id` — Primary Key; `product_id` — Foreign Key referencing `products_materials.product_id`; `reference_id` — Related Identifier |
 
 The expected fields and data types must follow the documented source schema. Primary keys identify individual records, while documented foreign keys establish relationships between tables. Related identifiers must be checked against the actual database schema before being treated as foreign keys. Required fields and applicable constraints must be validated during extraction, and any inconsistencies must be recorded in the extraction logs.

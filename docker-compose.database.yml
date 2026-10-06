@@ -1,0 +1,21 @@
+services:
+  database:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in the ignored .env file}
+    ports:
+      - "127.0.0.1:${SMARTSTOCK_DB_PORT:-15432}:5432"
+    volumes:
+      - smartstock_pipeline_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  smartstock_pipeline_postgres_data:
+    name: smartstock-pipeline-postgres-data

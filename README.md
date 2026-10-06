@@ -12,9 +12,9 @@ python3 -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and provide the database host, database name, login, and password through environment variables. Never commit `.env`; it is ignored by Git. The helper reads `SMARTSTOCK_DB_HOST`, `SMARTSTOCK_DB_PORT`, `SMARTSTOCK_DB_NAME`, `SMARTSTOCK_DB_USER`, `SMARTSTOCK_DB_PASSWORD`, and optional `SMARTSTOCK_DB_CONNECT_TIMEOUT`. It does not load `.env` files itself; inject the settings through the shell, scheduler, or container environment. For a local shell, use `set -a; . ./.env; set +a` before running the helper.
+Copy `.env.example` to `.env` and set the application connection values plus a separate random `POSTGRES_ADMIN_PASSWORD` for Compose. Never commit `.env`; it is ignored by Git. The helper reads `SMARTSTOCK_DB_HOST`, `SMARTSTOCK_DB_PORT`, `SMARTSTOCK_DB_NAME`, `SMARTSTOCK_DB_USER`, `SMARTSTOCK_DB_PASSWORD`, and optional `SMARTSTOCK_DB_CONNECT_TIMEOUT`. It does not load `.env` files itself; inject only the `SMARTSTOCK_DB_*` settings into the pipeline worker environment. Keep `POSTGRES_ADMIN_PASSWORD` confined to the local Compose invocation and do not export it to pipeline workers.
 
-The `database` hostname in the local `.env` is the PostgreSQL service alias on the existing SmartStock candidate Docker network. A process running outside that network must set `SMARTSTOCK_DB_HOST` to a reachable PostgreSQL hostname/address instead. Do not publish or recreate the database container just for this connection.
+SmartStock Pipeline runs PostgreSQL as its own Compose project and persistent volume, separate from SmartStock Capstone. The database is published only on host loopback at `127.0.0.1:${SMARTSTOCK_DB_PORT}` (default `15432`). Start/manage only the Pipeline database with `docker compose -p smartstock-pipeline --env-file .env -f docker-compose.database.yml ...`; do not attach it to the Capstone Compose project or volume. Keep both the application and PostgreSQL administrator credentials in the ignored, mode-restricted `.env` file.
 
 To check connectivity from a process with the variables loaded:
 
@@ -24,7 +24,7 @@ python -c 'from smartstock_pipeline.db import check_connection; print(check_conn
 
 The probe issues only `SELECT 1`. Configuration errors identify missing variable names; connection errors do not include driver diagnostics or credentials.
 
-The development database `smartstock_pipeline` is a separate source database on the existing SmartStock candidate PostgreSQL server. Its dedicated login is stored in the ignored, mode-restricted local `.env`. The existing `smartstock` database and its data were not modified. The five documented source tables are defined in `db/schema.sql` and have been applied; all tables are currently empty because no source records were provided. Apply the schema to a new empty database with `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql` after setting a suitable `DATABASE_URL` through the environment.
+The development database `smartstock_pipeline` belongs to the dedicated SmartStock Pipeline PostgreSQL service and volume. It is not hosted by the SmartStock Capstone PostgreSQL container or volume. The application login is separate from the PostgreSQL administrator login. The five canonical extraction tables are defined in `db/schema.sql`; raw workbook data that does not map losslessly to that contract is kept in the separate `workbook_import` staging schema. Do not move staged records into canonical tables without an approved mapping. Apply the canonical schema with `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql` after setting a suitable `DATABASE_URL` through the environment.
 
 ## Product/material extraction
 

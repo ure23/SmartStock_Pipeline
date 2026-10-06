@@ -136,3 +136,21 @@ Run the unit tests with:
 ```sh
 python -m unittest discover -s tests -v
 ```
+
+## PostgreSQL end-to-end test
+
+Run the synthetic Stage 1 integration test against the dedicated local Pipeline
+PostgreSQL service with:
+
+```sh
+.venv/bin/python scripts/test_stage1_postgres_e2e.py
+```
+
+The test requires the owner-only repository `.env` settings and a local
+`smartstock_pipeline` database at `127.0.0.1:15432`. It creates and drops only a
+uniquely named `smartstock_pipeline_test_*` database; it refuses remote hosts or
+other configured source databases. All fixture rows are synthetic. The test
+checks a five-table baseline, unchanged and changed deltas, deletion tombstones,
+contract headers, private output permissions, failed-schema non-publication and
+watermark stability, run metadata, and handover-marker recovery. It does not
+read or export client rows.

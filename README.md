@@ -1,0 +1,33 @@
+# SmartStock Pipeline — Stage 1 Extraction
+
+This repository currently documents the Stage 1 extraction requirements. The PostgreSQL connection helper is implemented in `smartstock_pipeline/db.py`.
+
+## PostgreSQL connection setup
+
+Install the Python dependency in a virtual environment:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Copy `.env.example` to `.env` and provide the database host, database name, login, and password through environment variables. Never commit `.env`; it is ignored by Git. The helper reads `SMARTSTOCK_DB_HOST`, `SMARTSTOCK_DB_PORT`, `SMARTSTOCK_DB_NAME`, `SMARTSTOCK_DB_USER`, `SMARTSTOCK_DB_PASSWORD`, and optional `SMARTSTOCK_DB_CONNECT_TIMEOUT`. It does not load `.env` files itself; inject the settings through the shell, scheduler, or container environment. For a local shell, use `set -a; . ./.env; set +a` before running the helper.
+
+The `database` hostname in the local `.env` is the PostgreSQL service alias on the existing SmartStock candidate Docker network. A process running outside that network must set `SMARTSTOCK_DB_HOST` to a reachable PostgreSQL hostname/address instead. Do not publish or recreate the database container just for this connection.
+
+To check connectivity from a process with the variables loaded:
+
+```sh
+python -c 'from smartstock_pipeline.db import check_connection; print(check_connection())'
+```
+
+The probe issues only `SELECT 1`. Configuration errors identify missing variable names; connection errors do not include driver diagnostics or credentials.
+
+The development database `smartstock_pipeline` is a separate source database on the existing SmartStock candidate PostgreSQL server. Its dedicated login is stored in the ignored, mode-restricted local `.env`. The existing `smartstock` database and its data were not modified. The five documented source tables are defined in `db/schema.sql` and have been applied; all tables are currently empty because no source records were provided. Apply the schema to a new empty database with `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql` after setting a suitable `DATABASE_URL` through the environment.
+
+Run the connection-helper unit tests with:
+
+```sh
+python -m unittest discover -s tests -v
+```

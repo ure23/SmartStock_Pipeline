@@ -46,6 +46,18 @@ python -m smartstock_pipeline.extract_inventory --output /path/to/inventory.csv
 
 The command exports only `inventory_id`, `product_id`, `quantity_on_hand`, `reorder_level`, and `last_updated`, in that order, sorted by `inventory_id`. It verifies the required source columns, preserves source values without transformations, and writes the completed UTF-8 CSV atomically. An empty source table produces a header-only CSV; it does not invent sample records.
 
+## Orders and order items extraction
+
+Export both related tables to separate CSV files from one read-only, repeatable-read snapshot:
+
+```sh
+python -m smartstock_pipeline.extract_orders \
+  --orders-output /path/to/orders.csv \
+  --order-items-output /path/to/order_items.csv
+```
+
+`orders.csv` contains `order_id`, `customer_id`, `order_date`, `status`, and `total_amount`; `order_items.csv` contains `order_item_id`, `order_id`, `product_id`, `quantity`, and `unit_price`. Both datasets are sorted by their primary keys. Required columns and unique primary keys are checked, source values are preserved without transformation, and each UTF-8 CSV is atomically replaced after successful serialization. The `order_id` field is present in both files for relationship tracking. Empty source tables produce header-only CSV files; no sample records are invented.
+
 Run the unit tests with:
 
 ```sh

@@ -50,3 +50,22 @@ COMMENT ON COLUMN orders.customer_id IS
     'Related identifier; no customers table is defined in the extraction contract.';
 COMMENT ON COLUMN stock_movements.reference_id IS
     'Related identifier; the referenced entity is not defined in the extraction contract.';
+
+-- Private pipeline-control metadata. Row contents stay in the canonical source
+-- tables; only primary-key strings and SHA-256 digests are retained here.
+CREATE TABLE IF NOT EXISTS pipeline_extraction_watermark (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    last_successful_run_id TEXT NOT NULL,
+    last_successful_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pipeline_extraction_row_state (
+    table_name TEXT NOT NULL,
+    record_key TEXT NOT NULL,
+    content_sha256 CHAR(64) NOT NULL,
+    PRIMARY KEY (table_name, record_key)
+);
+COMMENT ON TABLE pipeline_extraction_watermark IS
+    'Internal content-snapshot watermark; not part of the five-table CSV contract.';
+COMMENT ON TABLE pipeline_extraction_row_state IS
+    'Internal primary-key/content-hash state used to emit incremental CSV batches.';

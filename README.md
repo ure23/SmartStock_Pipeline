@@ -58,6 +58,19 @@ python -m smartstock_pipeline.extract_orders \
 
 `orders.csv` contains `order_id`, `customer_id`, `order_date`, `status`, and `total_amount`; `order_items.csv` contains `order_item_id`, `order_id`, `product_id`, `quantity`, and `unit_price`. Both datasets are sorted by their primary keys. Required columns and unique primary keys are checked, source values are preserved without transformation, and each UTF-8 CSV is atomically replaced after successful serialization. The `order_id` field is present in both files for relationship tracking. Empty source tables produce header-only CSV files; no sample records are invented.
 
+## Approved workbook mapping and export
+
+The user-approved workbook adapter maps the staged price list and order trackers into canonical products, orders, and order items. Run the mappers in order after loading the database environment variables:
+
+```sh
+python -m smartstock_pipeline.import_workbook_products
+python -m smartstock_pipeline.import_workbook_orders
+```
+
+Generated IDs are persisted in `workbook_import` mapping tables. The order mapper widens `orders.total_amount` and `order_items.quantity` to unconstrained `NUMERIC` to preserve the source precision, and records unmatched order-item source locators/reason codes in `workbook_import.pipeline_quarantine`. Do not delete quarantined source rows or invent replacements. This workbook has no inventory snapshot or stock-movement source; those canonical tables remain empty rather than being synthesized.
+
+For authorized CSV handover, set a restrictive umask and write files to a mode-0700 directory outside this repository. The exporters include only their canonical contract fields; do not commit client-derived CSVs or include row values in logs or AFFiNE. The workbook's `source_file_sha256` is a source-version fingerprint, not a row-modified timestamp, so the adapter does not claim daily incremental completeness.
+
 Run the unit tests with:
 
 ```sh

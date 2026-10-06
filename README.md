@@ -26,7 +26,17 @@ The probe issues only `SELECT 1`. Configuration errors identify missing variable
 
 The development database `smartstock_pipeline` is a separate source database on the existing SmartStock candidate PostgreSQL server. Its dedicated login is stored in the ignored, mode-restricted local `.env`. The existing `smartstock` database and its data were not modified. The five documented source tables are defined in `db/schema.sql` and have been applied; all tables are currently empty because no source records were provided. Apply the schema to a new empty database with `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql` after setting a suitable `DATABASE_URL` through the environment.
 
-Run the connection-helper unit tests with:
+## Product/material extraction
+
+Run the first-stage product/material extraction after loading the database environment variables:
+
+```sh
+python -m smartstock_pipeline.extract_products_materials --output /path/to/products_materials.csv
+```
+
+The command exports only `product_id`, `product_name`, `category`, `unit_price`, `reorder_level`, `status`, and `updated_at`, in that order, sorted by `product_id`. It verifies the required source columns, preserves source values without transformations, and writes the completed UTF-8 CSV atomically. A table with no rows produces a CSV containing the documented header and zero data rows; it does not invent sample records.
+
+Run the unit tests with:
 
 ```sh
 python -m unittest discover -s tests -v

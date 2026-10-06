@@ -212,7 +212,7 @@ The implemented extractors write a privacy-safe JSON metadata record when each e
 
 The metadata values shown above are examples only. Actual values will depend on the results of each extraction run.
 
-The current exporters record `products_materials`, `inventory`, `orders`, and `order_items`; the combined order run includes separate counts for both order tables. No stock-movement exporter is implemented, so stock-movement extraction and metadata remain outstanding.
+The current exporters record `products_materials`, `inventory`, `orders`, `order_items`, and `stock_movements`; the combined order run includes separate counts for both order tables. The stock-movement exporter is implemented, but the workbook does not provide movement records and the canonical source table is currently empty, so populated movement extraction is unverified.
 
 The extraction will use relevant available data from the selected source tables. Historical transaction and stock movement records will be extracted according to the defined extraction window and the available source data. Product and inventory records will be extracted according to the requirements of the analytics pipeline.
 

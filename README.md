@@ -46,6 +46,16 @@ python -m smartstock_pipeline.extract_inventory --output /path/to/inventory.csv
 
 The command exports only `inventory_id`, `product_id`, `quantity_on_hand`, `reorder_level`, and `last_updated`, in that order, sorted by `inventory_id`. It verifies the required source columns, preserves source values without transformations, and writes the completed UTF-8 CSV atomically. An empty source table produces a header-only CSV; it does not invent sample records.
 
+## Stock-movement extraction
+
+Export the documented `stock_movements` table after loading the database environment variables:
+
+```sh
+python -m smartstock_pipeline.extract_stock_movements --output /path/to/stock_movements.csv
+```
+
+The command writes `movement_id`, `product_id`, `movement_type`, `quantity`, `movement_date`, and `reference_id` in contract order. It checks required columns and unique movement IDs, uses an atomic UTF-8 CSV write, and logs the extraction run. An empty table yields a header-only file and does not invent movements. The supplied workbook has no stock-movement source, so populated extraction remains unverified until approved source records are provided.
+
 ## Orders and order items extraction
 
 Export both related tables to separate CSV files from one read-only, repeatable-read snapshot:
@@ -62,7 +72,7 @@ python -m smartstock_pipeline.extract_orders \
 
 Each implemented exporter writes one privacy-safe JSON log per run under `logs/` in the current project directory. Set `SMARTSTOCK_LOG_DIR` to use a different project-controlled directory. Each log contains a unique run ID, table name(s), a `full_snapshot` extraction window, UTC start/end times, success/failure status, read/extracted/rejected counts, the extraction validation result, a sanitized error description, and duration. For combined order exports, counts are recorded separately for `orders` and `order_items`. The current extractors do not implement verified incremental windows; `full_snapshot` must not be interpreted as proof of completeness against an external source.
 
-The log directory is created with mode `0700` and log files with mode `0600`; logs contain metadata only, never source cell values. If the log directory is not safely owned/restricted or a run log cannot be written, the exporter returns a failure rather than treating the output as accepted. Successful logs older than 30 days are pruned when a later run completes; failed and malformed logs are retained for investigation. Do not store logs in a shared or public directory. No stock-movement exporter exists yet, so that table will not produce run logs until its extraction support is implemented.
+The log directory is created with mode `0700` and log files with mode `0600`; logs contain metadata only, never source cell values. If the log directory is not safely owned/restricted or a run log cannot be written, the exporter returns a failure rather than treating the output as accepted. Successful logs older than 30 days are pruned when a later run completes; failed and malformed logs are retained for investigation. Do not store logs in a shared or public directory. The stock-movement command now uses the same run-metadata logger, but the supplied workbook has no stock-movement source and the canonical table currently has no rows; do not invent movements or claim populated extraction.
 
 ## Approved workbook mapping and export
 

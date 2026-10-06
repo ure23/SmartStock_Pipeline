@@ -20,6 +20,7 @@ from smartstock_pipeline.db import (
     DatabaseConnectionError,
     connect,
 )
+from smartstock_pipeline.run_metadata import ExtractionRun, RunMetadataError, safe_error_summary
 
 
 @dataclass(frozen=True)
@@ -295,8 +296,58 @@ def validate_csv(path: str | Path, table_name: str) -> tuple[int, list[str]]:
     return row_count, errors
 
 
+def validate_foreign_key_rows(paths: Mapping[str, str | Path]) -> list[str]:
+    """Check CSV foreign-key references without exposing identifier values."""
+    primary_values: dict[str, set[str]] = {}
+    table_rows: dict[str, list[tuple[int, list[str]]]] = {}
+    for table_name, contract in CONTRACTS.items():
+        with Path(paths[table_name]).expanduser().open(encoding="utf-8-sig", newline="") as source:
+            reader = csv.reader(source, strict=True)
+            next(reader)
+            rows = [(row_number, row) for row_number, row in enumerate(reader, start=2)]
+        table_rows[table_name] = rows
+        primary_indexes = tuple(contract.headers.index(field) for field in contract.primary_key)
+        primary_values[table_name] = {
+            row[index]
+            for _, row in rows
+            if len(row) == len(contract.fields)
+            and all(row[index] != "" for index in primary_indexes)
+            for index in primary_indexes
+        }
+
+    errors: list[str] = []
+    for table_name, contract in CONTRACTS.items():
+        for field_name, referenced_table, _referenced_field in contract.foreign_keys:
+            field_index = contract.headers.index(field_name)
+            for row_number, row in table_rows[table_name]:
+                if len(row) != len(contract.fields):
+                    continue
+                value = row[field_index]
+                if value and value not in primary_values[referenced_table]:
+                    errors.append(
+                        f"{table_name}: row {row_number} has an unresolved foreign key in {field_name}"
+                    )
+    return errors
+
+
+def validate_source_counts(connection, csv_counts: Mapping[str, int]) -> list[str]:
+    """Compare validated CSV row counts with one-snapshot source table counts."""
+    count_queries = " UNION ALL ".join(
+        f"SELECT '{table_name}'::text AS table_name, COUNT(*)::BIGINT AS row_count "
+        f"FROM {table_name}"
+        for table_name in CONTRACTS
+    )
+    source_counts = dict(connection.execute(count_queries).fetchall())
+    return [
+        f"{table_name}: CSV row count {csv_counts[table_name]} does not match "
+        f"source row count {source_counts[table_name]}"
+        for table_name in CONTRACTS
+        if csv_counts[table_name] != source_counts[table_name]
+    ]
+
+
 def validate_outputs(paths: Mapping[str, str | Path], connection=None) -> dict[str, int]:
-    """Validate all five CSVs and, when supplied, their PostgreSQL source schema."""
+    """Validate all CSVs, source schema, and source row counts when connected."""
     errors: list[str] = []
     if set(paths) != set(CONTRACTS):
         missing = sorted(set(CONTRACTS) - set(paths))
@@ -317,16 +368,24 @@ def validate_outputs(paths: Mapping[str, str | Path], connection=None) -> dict[s
             errors.extend(csv_errors)
         except (OSError, csv.Error, UnicodeError) as exc:
             errors.append(f"{table_name}: could not read CSV ({type(exc).__name__})")
+    if not errors:
+        try:
+            errors.extend(validate_foreign_key_rows(paths))
+        except (OSError, csv.Error, UnicodeError) as exc:
+            errors.append(f"Could not check CSV foreign keys ({type(exc).__name__})")
+    if connection is not None and not errors:
+        errors.extend(validate_source_counts(connection, counts))
     if errors:
-        raise ContractValidationError(errors)
+        raise ContractValidationError(errors, counts)
     return counts
 
 
 class ContractValidationError(ValueError):
     """Raised when a source schema or output CSV violates the data contract."""
 
-    def __init__(self, errors: list[str]):
+    def __init__(self, errors: list[str], counts: Mapping[str, int] | None = None):
         self.errors = tuple(errors)
+        self.counts = dict(counts or {})
         super().__init__("Extraction contract validation failed: " + "; ".join(errors))
 
 
@@ -339,7 +398,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--csv-only",
         action="store_true",
-        help="Validate CSV contracts without connecting to PostgreSQL.",
+        help="Validate CSV contracts without connecting to PostgreSQL or comparing source row counts.",
     )
     return parser
 
@@ -350,24 +409,46 @@ def main(argv: Sequence[str] | None = None) -> int:
         table_name: getattr(args, table_name)
         for table_name in CONTRACTS
     }
+    run = ExtractionRun(tuple(CONTRACTS))
+    counts: dict[str, int] = {}
     try:
-        if args.csv_only:
-            counts = validate_outputs(paths)
-        else:
-            with connect() as connection:
-                counts = validate_outputs(paths, connection)
+        with run:
+            try:
+                if args.csv_only:
+                    counts = validate_outputs(paths)
+                else:
+                    with connect() as connection:
+                        counts = validate_outputs(paths, connection)
+            except ContractValidationError as exc:
+                run.record_validation_errors(exc.errors)
+                for table_name, count in exc.counts.items():
+                    run.record_counts(
+                        table_name,
+                        records_read=count,
+                        records_extracted=count,
+                    )
+                raise
+            for table_name, count in counts.items():
+                run.record_counts(
+                    table_name,
+                    records_read=count,
+                    records_extracted=count,
+                )
+    except ContractValidationError as exc:
+        print(f"Validation failed: {exc}", file=sys.stderr)
+        return 1
     except (
-        ContractValidationError,
         DatabaseConfigurationError,
         DatabaseConnectionError,
+        RunMetadataError,
         OSError,
         psycopg.Error,
     ) as exc:
-        print(f"Validation failed: {exc}", file=sys.stderr)
+        print(f"Validation failed: {safe_error_summary(exc)}", file=sys.stderr)
         return 1
     print("Extraction contract validation passed: " + ", ".join(
         f"{name}={counts[name]} row(s)" for name in CONTRACTS
-    ))
+    ) + f" (run_id={run.run_id})")
     return 0
 
 

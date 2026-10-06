@@ -46,6 +46,7 @@ class ExtractionRunMetadataTests(unittest.TestCase):
         self.assertEqual(metadata["records_rejected"], 0)
         self.assertEqual(metadata["records"]["products_materials"]["records_read"], 12)
         self.assertIsNone(metadata["error_message"])
+        self.assertEqual(metadata["validation_errors"], [])
         self.assertTrue(metadata["start_timestamp"].endswith("Z"))
         self.assertTrue(metadata["end_timestamp"].endswith("Z"))
 

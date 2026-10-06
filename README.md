@@ -70,7 +70,7 @@ python -m smartstock_pipeline.extract_orders \
 
 ## Extraction run metadata and log retention
 
-Each implemented exporter writes one privacy-safe JSON log per run under `logs/` in the current project directory. Set `SMARTSTOCK_LOG_DIR` to use a different project-controlled directory. Each log contains a unique run ID, table name(s), a `full_snapshot` extraction window, UTC start/end times, success/failure status, read/extracted/rejected counts, the extraction validation result, a sanitized error description, and duration. For combined order exports, counts are recorded separately for `orders` and `order_items`. The current extractors do not implement verified incremental windows; `full_snapshot` must not be interpreted as proof of completeness against an external source.
+Each implemented exporter and the contract validator write one privacy-safe JSON log per run under `logs/` in the current project directory. Set `SMARTSTOCK_LOG_DIR` to use a different project-controlled directory. Each log contains a unique run ID, table name(s), a `full_snapshot` extraction window, UTC start/end times, success/failure status, read/extracted/rejected counts, validation result, value-free validation error locations when applicable, a sanitized error description, and duration. For combined order exports, counts are recorded separately for `orders` and `order_items`. The current extractors do not implement verified incremental windows; `full_snapshot` must not be interpreted as proof of completeness against an external source.
 
 The log directory is created with mode `0700` and log files with mode `0600`; logs contain metadata only, never source cell values. If the log directory is not safely owned/restricted or a run log cannot be written, the exporter returns a failure rather than treating the output as accepted. Successful logs older than 30 days are pruned when a later run completes; failed and malformed logs are retained for investigation. Do not store logs in a shared or public directory. The stock-movement command now uses the same run-metadata logger, but the supplied workbook has no stock-movement source and the canonical table currently has no rows; do not invent movements or claim populated extraction.
 
@@ -89,13 +89,13 @@ For authorized CSV handover, set a restrictive umask and write files to a mode-0
 
 ## Extraction contract validation
 
-Validate all five CSV contracts and the live PostgreSQL schema before handover. The validator checks exact field order and names, cell data types, PostgreSQL column types/lengths, primary keys, and documented foreign keys. It reports row/column locations only, never cell contents. It does not clean, transform, or export source data.
+Validate all five CSV contracts, cross-file foreign-key references, the live PostgreSQL schema, and aggregate source row counts before handover. The validator checks exact field order/names, cell data types, PostgreSQL column types/lengths, primary keys, documented foreign keys, and per-table CSV-versus-source record counts from a single SQL statement snapshot. It reports only table/column/row locations and aggregate counts, never cell contents. It does not clean, transform, or export source data, and matching counts are not row-by-row identity proof.
 
 ```sh
 python -m smartstock_pipeline.validate_contract --products-materials /path/products_materials.csv --inventory /path/inventory.csv --orders /path/orders.csv --order-items /path/order_items.csv --stock-movements /path/stock_movements.csv
 ```
 
-Use `--csv-only` when no database connection is needed. All five CSV paths are required; absent outputs fail validation rather than being treated as empty. The validator checks schema/data-contract conformance, not record-count completeness or source-to-file reconciliation.
+Use `--csv-only` when no database connection is needed; it skips live-schema and source-count checks. All five CSV paths are required; absent outputs fail validation rather than being treated as empty. Database-backed validation compares aggregate per-table counts but does not prove row-by-row identity or completeness for an unverified incremental window.
 
 ## Unit tests
 

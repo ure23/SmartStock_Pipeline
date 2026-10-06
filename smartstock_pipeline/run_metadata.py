@@ -8,7 +8,7 @@ import stat
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from smartstock_pipeline.db import DatabaseConfigurationError, DatabaseConnectionError
 
@@ -121,6 +121,7 @@ class ExtractionRun:
         self.ended_at: datetime | None = None
         self._counts = {name: {"records_read": 0, "records_extracted": 0, "records_rejected": 0} for name in table_names}
         self._error_message: str | None = None
+        self._validation_errors: list[str] = []
         self.metadata: dict[str, Any] | None = None
 
     def __enter__(self) -> "ExtractionRun":
@@ -145,6 +146,12 @@ class ExtractionRun:
             "records_rejected": records_rejected,
         }
 
+    def record_validation_errors(self, errors: Sequence[str]) -> None:
+        """Attach value-free contract diagnostics to the run metadata."""
+        if any(not isinstance(error, str) for error in errors):
+            raise TypeError("Validation errors must be strings")
+        self._validation_errors = list(errors)
+
     def __exit__(self, exc_type, exc, traceback) -> bool:
         self.ended_at = _utc_now()
         if exc is not None:
@@ -166,6 +173,7 @@ class ExtractionRun:
             "records_extracted": sum(item["records_extracted"] for item in records.values()),
             "records_rejected": sum(item["records_rejected"] for item in records.values()),
             "validation_result": "FAIL" if exc is not None else "PASS",
+            "validation_errors": self._validation_errors,
             "error_message": self._error_message,
             "duration_seconds": round(elapsed, 6),
         }

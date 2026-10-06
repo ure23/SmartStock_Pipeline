@@ -193,7 +193,7 @@ The extraction validation checks are used to verify that the required SmartStock
 
 ## 4. Extraction Metadata and Log Specification
 
-The implemented extractors write a privacy-safe JSON metadata record when each extraction run finishes. The record contains a unique run ID, source table name(s), extraction window, UTC start/end timestamps, success/failure status, read/extracted/rejected counts, validation result, sanitized error description, and duration. The value `full_snapshot` is used because reliable incremental watermarks are not yet implemented or verified; it does not prove source completeness. A successful result means the current extractor's query, required-column/primary-key checks, and CSV write completed, not that the dataset has passed full source-to-output reconciliation.
+The implemented exporters and contract validator write a privacy-safe JSON metadata record when each run finishes. The record contains a unique run ID, source table name(s), extraction window, UTC start/end timestamps, success/failure status, read/extracted/rejected counts, validation result, a sanitized error description, and duration. Validator runs additionally store value-free table/column/row diagnostics when checks fail. The value `full_snapshot` is used because reliable incremental watermarks are not yet implemented or verified; it does not prove source completeness. A successful result means the command's schema/primary-key checks, CSV processing, and count reconciliation (when database-backed validation is used) completed; it does not establish row-by-row identity or completeness for an unverified incremental window.
 
 | Field Name          | Purpose                                                                 | Example Value / Format         |
 | ------------------- | ----------------------------------------------------------------------- | ------------------------------ |
@@ -208,11 +208,12 @@ The implemented extractors write a privacy-safe JSON metadata record when each e
 | `extraction_window` | Specifies the range covered by the extraction run.                     | `full_snapshot` (no verified incremental watermark) |
 | `validation_result` | Records the outcome of extraction validation.                           | `PASS`                  |
 | `error_message`     | Documents the error encountered, if any.                                | `NULL`                         |
+| `validation_errors` | Stores table/column/row-level validation diagnostics without cell values. | `[]` or value-free location messages |
 | `duration_seconds` | Records the total extraction time in seconds.                           | `5.0`                          |
 
 The metadata values shown above are examples only. Actual values will depend on the results of each extraction run.
 
-The current exporters record `products_materials`, `inventory`, `orders`, `order_items`, and `stock_movements`; the combined order run includes separate counts for both order tables. The stock-movement exporter is implemented, but the workbook does not provide movement records and the canonical source table is currently empty, so populated movement extraction is unverified.
+The current exporters record `products_materials`, `inventory`, `orders`, `order_items`, and `stock_movements`; the combined order run includes separate counts for both order tables. The validator records a separate validation-run log, including value-free failure diagnostics, and compares aggregate per-table CSV and source row counts when connected to PostgreSQL. The stock-movement exporter is implemented, but the workbook does not provide movement records and the canonical source table is currently empty, so populated movement extraction is unverified.
 
 The extraction will use relevant available data from the selected source tables. Historical transaction and stock movement records will be extracted according to the defined extraction window and the available source data. Product and inventory records will be extracted according to the requirements of the analytics pipeline.
 
@@ -303,9 +304,9 @@ The extraction process will check whether the source tables, column names, data 
 
 Schema validation results and related errors will be recorded in the extraction logs to maintain consistency between the source database, extraction script, and output dataset.
 
-The implemented validator is `smartstock_pipeline.validate_contract`. It validates all five CSV contracts using exact header names/order and parses each non-empty value against the documented field type without rewriting it. It also checks PostgreSQL source column types/lengths, primary keys, and documented foreign keys before outputs are accepted. Missing tables/columns, unexpected columns, contract mismatches, malformed rows, and unreadable or missing CSV files fail validation. Error messages include table/column/row locations only and never print client cell values.
+The implemented validator is `smartstock_pipeline.validate_contract`. It validates all five CSV contracts using exact header names/order and parses each non-empty value against the documented field type without rewriting it. It checks that exported foreign-key values resolve to primary keys in the related CSVs, and checks PostgreSQL source column types/lengths, primary keys, and documented foreign keys. In database-backed mode, it compares each validated CSV row count with the corresponding source-table `COUNT(*)` values returned by one SQL statement snapshot. Error messages contain table/column/row locations and aggregate counts only; they never print client cell values.
 
-The validator requires a CSV path for every contract, including `stock_movements`; it does not substitute a missing file with an empty one. `--csv-only` validates files without a database connection. Schema conformance does not establish completeness or prove that the CSV row count matches a source query; those checks remain a separate acceptance criterion. The validator preserves original source values and performs no cleaning or business transformation.
+The validator requires a CSV path for every contract, including `stock_movements`; it does not substitute a missing file with an empty one. `--csv-only` validates file contracts without a database connection and skips source-schema/count checks. Database-backed count reconciliation checks aggregate row totals, not row-by-row identity, incremental watermark coverage, or completeness against an external source. The validator preserves original source values and performs no cleaning or business transformation.
 
 # 7. Extraction Acceptance and Handover Rules
 

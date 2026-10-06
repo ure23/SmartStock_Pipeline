@@ -1,6 +1,6 @@
 # SmartStock Pipeline — Stage 1 Extraction
 
-This repository currently documents the Stage 1 extraction requirements. The PostgreSQL connection helper is implemented in `smartstock_pipeline/db.py`.
+This repository implements the SmartStock Stage 1 extraction helpers, workbook adapters, five-table CSV exporters, contract validation, run metadata, and a manually invoked batch runner. The batch runner publishes outputs only after all exports and database-backed validation succeed. Verified incremental extraction and automatic daily scheduling remain pending source change-tracking and operational decisions.
 
 ## PostgreSQL connection setup
 
@@ -73,6 +73,18 @@ python -m smartstock_pipeline.extract_orders \
 Each implemented exporter and the contract validator write one privacy-safe JSON log per run under `logs/` in the current project directory. Set `SMARTSTOCK_LOG_DIR` to use a different project-controlled directory. Each log contains a unique run ID, table name(s), a `full_snapshot` extraction window, UTC start/end times, success/failure status, read/extracted/rejected counts, validation result, value-free validation error locations when applicable, a sanitized error description, and duration. For combined order exports, counts are recorded separately for `orders` and `order_items`. The current extractors do not implement verified incremental windows; `full_snapshot` must not be interpreted as proof of completeness against an external source.
 
 The log directory is created with mode `0700` and log files with mode `0600`; logs contain metadata only, never source cell values. If the log directory is not safely owned/restricted or a run log cannot be written, the exporter returns a failure rather than treating the output as accepted. Successful logs older than 30 days are pruned when a later run completes; failed and malformed logs are retained for investigation. Do not store logs in a shared or public directory. The stock-movement command now uses the same run-metadata logger, but the supplied workbook has no stock-movement source and the canonical table currently has no rows; do not invent movements or claim populated extraction.
+
+## Combined one-shot extraction batch
+
+Run the ordered full-snapshot pipeline after loading the database environment variables:
+
+```sh
+python -m smartstock_pipeline.run_pipeline --output-dir /secure/path/smartstock-handover-YYYYMMDD
+```
+
+The destination must be new. The runner creates a private sibling staging directory, exports all five CSVs, validates the CSV contracts/relationships plus the live PostgreSQL schema and aggregate source counts, and then atomically renames the complete directory into place. If extraction, validation, or logging fails, it removes the staged batch and publishes no partial output. The published directory is mode `0700`; its CSVs are mode `0600`. Each run writes one privacy-safe aggregate metadata record. The command reports table counts only, not row values.
+
+This command is currently a manually invoked full snapshot. It does not apply incremental watermarks and does not configure or run a daily schedule. Those steps remain pending until reliable source change tracking and the schedule/output-retention decisions are approved; `full_snapshot` is not an incremental completeness guarantee.
 
 ## Approved workbook mapping and export
 

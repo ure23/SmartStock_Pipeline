@@ -48,6 +48,8 @@ An initial extraction will establish the required starting dataset, while succee
 
 The extraction is performed as a daily batch process to retrieve newly added or updated SmartStock records for the analytics process.
 
+**Current implementation status:** `smartstock_pipeline.run_pipeline` currently provides a manually invoked full-snapshot batch, not a daily schedule. It exports the five CSVs in sequence, validates the completed set against the live PostgreSQL schema and aggregate source counts, and publishes the directory only after all checks pass. Incremental extraction and automated scheduling remain pending because reliable update tracking, approved schedule time/timezone, and output-retention/consumption details are not yet established.
+
 ### 1.4 Extraction Scope
 
 The extraction includes the SmartStock information required by the analytics pipeline.

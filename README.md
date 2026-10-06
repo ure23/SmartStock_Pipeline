@@ -1,6 +1,6 @@
 # SmartStock Pipeline — Stage 1 Extraction
 
-This repository implements the SmartStock Stage 1 extraction helpers, workbook adapters, five-table CSV exporters, contract validation, run metadata, and a manually invoked batch runner. The batch runner publishes outputs only after all exports and database-backed validation succeed. Verified incremental extraction and automatic daily scheduling remain pending source change-tracking and operational decisions.
+This repository implements the SmartStock Stage 1 extraction helpers, workbook adapters, five-table CSV exporters, contract validation, run metadata, a manual full-snapshot batch runner, and a daily content-hash incremental runner. The incremental runner reads a repeatable-read snapshot, emits only new/changed rows plus deletion tombstones, advances its database watermark only after validation/publication, and marks a batch ready for handover only after its run log succeeds. The daily schedule is configured separately; Stage 2 must consume only batches with a `handover_ready.json` marker.
 
 ## PostgreSQL connection setup
 
@@ -12,7 +12,7 @@ python3 -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and set the application connection values plus a separate random `POSTGRES_ADMIN_PASSWORD` for Compose. Never commit `.env`; it is ignored by Git. The helper reads `SMARTSTOCK_DB_HOST`, `SMARTSTOCK_DB_PORT`, `SMARTSTOCK_DB_NAME`, `SMARTSTOCK_DB_USER`, `SMARTSTOCK_DB_PASSWORD`, and optional `SMARTSTOCK_DB_CONNECT_TIMEOUT`. It does not load `.env` files itself; inject only the `SMARTSTOCK_DB_*` settings into the pipeline worker environment. Keep `POSTGRES_ADMIN_PASSWORD` confined to the local Compose invocation and do not export it to pipeline workers.
+Copy `.env.example` to `.env` and set the application connection values plus a separate random `POSTGRES_ADMIN_PASSWORD` for Compose. Never commit `.env`; it is ignored by Git. Manual extraction helpers read `SMARTSTOCK_DB_HOST`, `SMARTSTOCK_DB_PORT`, `SMARTSTOCK_DB_NAME`, `SMARTSTOCK_DB_USER`, `SMARTSTOCK_DB_PASSWORD`, and optional `SMARTSTOCK_DB_CONNECT_TIMEOUT` from the environment. The daily `scheduled_runner` loads only those `SMARTSTOCK_DB_*` values from the repository `.env`, and requires that file to be owned by the current user and inaccessible to group/others. Keep `POSTGRES_ADMIN_PASSWORD` confined to the local Compose invocation; the pipeline worker ignores it.
 
 SmartStock Pipeline runs PostgreSQL as its own Compose project and persistent volume, separate from SmartStock Capstone. The database is published only on host loopback at `127.0.0.1:${SMARTSTOCK_DB_PORT}` (default `15432`). Start/manage only the Pipeline database with `docker compose -p smartstock-pipeline --env-file .env -f docker-compose.database.yml ...`; do not attach it to the Capstone Compose project or volume. Keep both the application and PostgreSQL administrator credentials in the ignored, mode-restricted `.env` file.
 
@@ -74,17 +74,37 @@ Each implemented exporter and the contract validator write one privacy-safe JSON
 
 The log directory is created with mode `0700` and log files with mode `0600`; logs contain metadata only, never source cell values. If the log directory is not safely owned/restricted or a run log cannot be written, the exporter returns a failure rather than treating the output as accepted. Successful logs older than 30 days are pruned when a later run completes; failed and malformed logs are retained for investigation. Do not store logs in a shared or public directory. The stock-movement command now uses the same run-metadata logger, but the supplied workbook has no stock-movement source and the canonical table currently has no rows; do not invent movements or claim populated extraction.
 
-## Combined one-shot extraction batch
+## Incremental extraction and daily handover
 
-Run the ordered full-snapshot pipeline after loading the database environment variables:
+Run one incremental batch manually after loading the database environment variables:
 
 ```sh
-python -m smartstock_pipeline.run_pipeline --output-dir /secure/path/smartstock-handover-YYYYMMDD
+python -m smartstock_pipeline.incremental_pipeline --output-dir /secure/path/batch-YYYYMMDDTHHMMSS
 ```
 
-The destination must be new. The runner creates a private sibling staging directory, exports all five CSVs, validates the CSV contracts/relationships plus the live PostgreSQL schema and aggregate source counts, and then atomically renames the complete directory into place. If extraction, validation, or logging fails, it removes the staged batch and publishes no partial output. The published directory is mode `0700`; its CSVs are mode `0600`. Each run writes one privacy-safe aggregate metadata record. The command reports table counts only, not row values.
+The first successful run is a complete baseline; later runs scan a repeatable-read snapshot of all five source tables and emit only rows whose stable primary-key/content hash is new or changed. It writes deletion tombstones to `deletions.csv`, because the source has no verified per-row modified/deleted timestamps. Hashes and keys are retained only in the Pipeline database control tables `pipeline_extraction_row_state` and `pipeline_extraction_watermark`; client row values remain in the source tables. The timestamped watermark is an audit marker, not a SQL date cutoff. This content-based method detects inserts, updates, and deletions as visible in the database snapshot, but it does not prove the external source system has delivered every change.
 
-This command is currently a manually invoked full snapshot. It does not apply incremental watermarks and does not configure or run a daily schedule. Those steps remain pending until reliable source change tracking and the schedule/output-retention decisions are approved; `full_snapshot` is not an incremental completeness guarantee.
+Each batch contains the five contract CSVs (delta rows after the baseline, headers always included), `deletions.csv`, `extraction_metadata.json`, and `handover_ready.json`. The output directory is mode `0700`, files are mode `0600`; failed extraction/validation or failed run logging does not produce a ready marker. If the process stops after committing its database state but before writing that marker, the next run recovers the marker only when its run ID matches the last-successful DB watermark. The downstream Transformation Stage must process only batches with a valid `handover_ready.json`; Stage 1 does not start Stage 2 automatically. Batches are retained under the handover directory without automatic deletion because the consumer/retention deadline has not been approved. Successful run metadata logs continue to follow their 30-day minimum retention policy.
+
+The scheduled entrypoint is:
+
+```sh
+python -m smartstock_pipeline.scheduled_runner
+```
+
+It loads only `SMARTSTOCK_DB_*` settings from the owner-only repository `.env`, creates owner-only storage at `~/.local/share/smartstock-pipeline/`, prevents overlapping runs with a file lock, and writes immutable timestamped batches under `handover/`. The root cron job runs daily at **02:00 Asia/Manila**. The time is an operational default chosen to avoid daytime load; change it only through an approved schedule update. The job performs a content-hash incremental scan, not a timestamp-window query.
+
+## Combined one-shot full-snapshot batch
+
+The separately available one-shot full-snapshot runner remains:
+
+```sh
+python -m smartstock_pipeline.run_pipeline --output-dir /secure/path/snapshot-YYYYMMDD
+```
+
+The destination must be new. The runner creates a private sibling staging directory, exports all five CSVs, validates CSV contracts/relationships plus the live PostgreSQL schema and aggregate source counts, then atomically renames the complete directory into place. If extraction, validation, or logging fails, it removes the staged batch and publishes no partial output. This command is useful for a full snapshot, but does not update incremental hash state.
+
+The content-hash incremental method prevents unchanged rows from being re-exported while retaining full source-table scans for correctness. `full_snapshot` on the legacy exporters and the manual runner is not a verified incremental watermark or proof of completeness against an external source.
 
 ## Approved workbook mapping and export
 

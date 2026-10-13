@@ -232,3 +232,66 @@ Extraction logs are proposed to be retained for at least 30 days after each extr
 | Responsible Process    | The designated ETL or project administrator will manage log retention, archiving, and deletion.                                                      |
 
 Operational extraction logs will follow the defined retention period. Audit records required for longer-term review may be retained beyond 30 days when necessary. Actual storage, access, archiving, and deletion procedures will follow the project's implemented configuration.
+
+### 6.1 Required Schema
+
+The extraction data contract defines the expected source tables, fields, data types, and required identifiers and constraints of the SmartStock Inventory and Delivery Tracking System Analytics Pipeline. The source data comes from the SmartStock PostgreSQL database and is prepared for CSV output.
+
+| Source | Expected Fields | Data Types | Required Identifiers and Constraints |
+|---|---|---|---|
+| `products_materials` | `product_id`, `product_name`, `category`, `unit_price`, `reorder_level`, `status`, `updated_at` | INT, VARCHAR(150), VARCHAR(100), DECIMAL(12,2), INT, VARCHAR(30), DATETIME | `product_id` — Primary Key |
+| `inventory` | `inventory_id`, `product_id`, `quantity_on_hand`, `reorder_level`, `last_updated` | INT, INT, INT, INT, DATETIME | `inventory_id` — Primary Key; `product_id` — Foreign Key referencing `products_materials.product_id` |
+| `orders` | `order_id`, `customer_id`, `order_date`, `status`, `total_amount` | INT, INT, DATE, VARCHAR(30), DECIMAL(12,2) | `order_id` — Primary Key; `customer_id` — Related Identifier |
+| `order_items` | `order_item_id`, `order_id`, `product_id`, `quantity`, `unit_price` | INT, INT, INT, INT, DECIMAL(12,2) | `order_item_id` — Primary Key; `order_id` — Foreign Key referencing `orders.order_id`; `product_id` — Foreign Key referencing `products_materials.product_id` |
+| `stock_movements` | `movement_id`, `product_id`, `movement_type`, `quantity`, `movement_date`, `reference_id` | INT, INT, VARCHAR(30), INT, DATETIME, INT | `movement_id` — Primary Key; `product_id` — Foreign Key referencing `products_materials.product_id`; `reference_id` — Related Identifier |
+
+The expected fields and data types must follow the documented source schema. Primary keys identify individual records, while documented foreign keys establish relationships between tables. Related identifiers must be checked against the actual database schema before being treated as foreign keys. Required fields and applicable constraints must be validated during extraction, and any inconsistencies must be recorded in the extraction logs.
+
+## 6.2 Naming Convention
+
+The SmartStock extraction pipeline follows consistent naming rules to maintain readability and consistency across the PostgreSQL source tables, extraction scripts, and CSV output files.
+
+| Naming Rule | Specification |
+|---|---|
+| Column Naming Format | Use lowercase letters and `snake_case`, where multiple words are separated by underscores. Examples include `product_name`, `quantity_on_hand`, and `movement_date`. |
+| Abbreviations | Avoid unnecessary abbreviations and use descriptive names that clearly represent the stored data. Existing source column names should be retained unless a justified mapping is documented. |
+| Naming Consistency | Use the same column names consistently in the pipeline documentation, extraction scripts, and corresponding CSV output fields. |
+| Primary Key Naming | Use the entity name followed by `_id`, such as `product_id`, `inventory_id`, `order_id`, `order_item_id`, and `movement_id`. |
+| Foreign Key Naming | Use the referenced entity name followed by `_id` when a foreign-key relationship exists. Examples include `product_id` in `inventory` and `order_items`, and `order_id` in `order_items`. |
+
+These naming conventions help ensure that extracted fields remain identifiable and consistent throughout the pipeline. Any approved changes to field names must be documented in the source-to-standardized field mapping.
+
+## 6.3 Source-to-Standardized Field Mapping
+
+The source-to-standardized field mapping documents how source columns are represented in the extracted datasets. The SmartStock pipeline retains the documented source column names and data types unless a justified and documented transformation is required. The following table shows representative mappings from the five source tables.
+
+| Source Column | Standardized Column | Source Type | Target Type | Mapping Type |
+|---|---|---|---|---|
+| `products_materials.product_id` | `product_id` | INT | INT | Direct mapping |
+| `products_materials.product_name` | `product_name` | VARCHAR(150) | VARCHAR(150) | Direct mapping |
+| `products_materials.unit_price` | `unit_price` | DECIMAL(12,2) | DECIMAL(12,2) | Direct mapping |
+| `inventory.inventory_id` | `inventory_id` | INT | INT | Direct mapping |
+| `inventory.quantity_on_hand` | `quantity_on_hand` | INT | INT | Direct mapping |
+| `orders.order_id` | `order_id` | INT | INT | Direct mapping |
+| `orders.order_date` | `order_date` | DATE | DATE | Direct mapping |
+| `orders.total_amount` | `total_amount` | DECIMAL(12,2) | DECIMAL(12,2) | Direct mapping |
+| `order_items.order_item_id` | `order_item_id` | INT | INT | Direct mapping |
+| `order_items.quantity` | `quantity` | INT | INT | Direct mapping |
+| `stock_movements.movement_id` | `movement_id` | INT | INT | Direct mapping |
+| `stock_movements.movement_date` | `movement_date` | DATETIME* | DATETIME* | Direct mapping |
+
+The standardized column names must remain consistent throughout the extraction documentation, scripts, and output datasets. If a source column is renamed or its data type is converted, the mapping must be updated to identify the source field, standardized field, source type, target type, and mapping operation.
+
+**Note:** The data types in this table are based on the existing pipeline documentation and must be verified against the actual PostgreSQL schema and CSV output requirements. The table provides representative examples rather than a complete mapping of every column.
+
+### 6.4 Schema Consistency
+
+The extraction process will check whether the source tables, column names, data types, and required identifiers match the documented schema. Unexpected changes will be handled as follows:
+
+- **Column Name Changes:** If a required column is renamed or unavailable, the issue will be flagged and recorded in the extraction log. Extraction will not proceed if the affected column is necessary for the process.
+- **Data Type Changes:** If a column's data type differs from the documented schema, the change will be flagged for review to determine its effect on extraction and the expected output.
+- **Missing Required Fields:** If a required column or identifier is missing, schema validation will fail, and the issue will be recorded in the extraction log.
+- **Unexpected Additional Columns:** Additional columns will not automatically be included in the output unless they are reviewed and approved.
+- **Approved Schema Changes:** Approved changes will be documented and reflected in the Python extraction script when necessary.
+
+Schema validation results and related errors will be recorded in the extraction logs to maintain consistency between the source database, extraction script, and output dataset.

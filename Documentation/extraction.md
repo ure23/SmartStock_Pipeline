@@ -295,3 +295,115 @@ The extraction process will check whether the source tables, column names, data 
 - **Approved Schema Changes:** Approved changes will be documented and reflected in the Python extraction script when necessary.
 
 Schema validation results and related errors will be recorded in the extraction logs to maintain consistency between the source database, extraction script, and output dataset.
+
+# 7. Extraction Acceptance and Handover Rules
+
+The extraction stage must validate the extracted data before passing it to the Transformation Stage. These rules define the conditions for accepting, reviewing, or rejecting the extracted data to ensure that it is complete, accessible, and ready for the next stage.
+
+## 7.1 Automatic Approval
+
+The extracted data can proceed automatically when all critical validation checks pass.
+
+- All five required source tables are accessible: `products_materials`, `inventory`, `orders`, `order_items`, and `stock_movements`.
+- All required columns and identifiers are present.
+- Primary key values are unique within the extracted records.
+- The extracted record counts match the results returned by the source extraction queries.
+- The extraction completes successfully within the defined extraction window.
+- All required CSV output files are generated and readable.
+- No critical extraction errors are encountered.
+
+When all these conditions are met, the extraction status will be marked as **APPROVED**, and the data can proceed to the Transformation Stage.
+
+## 7.2 Manual Review
+
+Manual review is required when non-critical warnings or unexpected results need further investigation.
+
+Examples include:
+
+- The extracted record count differs from the expected count and requires verification.
+- Unexpected additional columns are found in the source schema.
+- Non-critical warnings appear in the extraction logs.
+- Unexpected results require confirmation before the data can proceed.
+
+The pipeline must hold the affected data until an authorized team member reviews the issue. The reviewer must document the findings and decide whether the data can be accepted or must be extracted again.
+
+**Responsible Role:** Assigned ETL Team Member or designated project team member.
+
+## 7.3 Rejection or Failure
+
+The extracted data must be rejected when a critical issue prevents it from meeting the required validation conditions.
+
+Examples include:
+
+- The SmartStock PostgreSQL database cannot be accessed.
+- A required source table or column is missing or inaccessible.
+- A required identifier is missing or primary key values are duplicated.
+- The extraction fails before all required records are retrieved.
+- A required CSV output file is missing, incomplete, or unreadable.
+- A critical extraction error prevents the data from being validated.
+
+When a critical failure occurs, the pipeline must stop the handover process and record the error in the extraction log. The extraction may be retried if the problem is temporary. If the problem persists, the pipeline must remain stopped until the issue is resolved. Failed or incomplete data must not proceed to the Transformation Stage.
+
+## 7.4 Handover
+
+After the extraction is approved, the extracted data and its supporting records will be prepared for the Transformation Stage.
+
+The handover must include:
+
+- **Extracted Data:** CSV output files containing records from `products_materials`, `inventory`, `orders`, `order_items`, and `stock_movements`.
+- **Extraction Metadata:** Pipeline run ID, source table name, start and end timestamps, extraction status, record counts, and extraction window.
+- **Validation Results:** Results of the required table, column, identifier, primary key uniqueness, record count, and extraction completeness checks.
+- **Extraction Logs:** Records of successful operations, warnings, errors, and actions taken to resolve issues.
+- **Handover Status:** The final acceptance decision indicating whether the extracted data is approved to proceed to the Transformation Stage.
+
+The receiving stage must verify that the required output files and supporting records are available. Data cleaning, standardization, and business transformations will be handled in the Transformation Stage.
+
+## 7.5 Decision Rules
+
+| Overall Condition | Acceptance Decision | Pipeline Action |
+|---|---|---|
+| All required tables PASS | APPROVED | Proceed to Transformation |
+| One or more non-critical WARNING | MANUAL REVIEW | Hold pipeline |
+| One or more critical FAIL | REJECTED | Stop/retry extraction as appropriate |
+
+## 7.6 Validation Summary
+
+| Validation Summary | Expected Result |
+|---|---|
+| `products_materials` table validation | PASS |
+| `inventory` table validation | PASS |
+| `orders` table validation | PASS |
+| `order_items` table validation | PASS |
+| `stock_movements` table validation | PASS |
+| Required columns and identifiers validation | PASS |
+| Primary key uniqueness validation | PASS |
+| Record count validation | PASS |
+| Extraction completeness validation | PASS |
+| CSV output file validation | PASS |
+| **Overall Extraction** | **APPROVED** |
+
+The expected results above describe the conditions required for successful extraction. Actual validation results must be recorded after the extraction process runs. If any critical check fails or a non-critical warning requires investigation, the overall extraction decision must follow the rules defined in Section 7.5.
+
+The acceptance and handover rules described in this section will serve as implementation requirements for the extraction pipeline. The validation checks, decision handling, and handover procedures will be implemented and verified during development.
+
+# 8. Common Extraction Problems and Mitigation
+
+The extraction process may encounter technical problems when retrieving data from the SmartStock PostgreSQL database and generating CSV output files. The following problems, possible causes, impacts, and proposed solutions are identified to help maintain the completeness and reliability of the extracted data.
+
+## 8.1 Common Extraction Problems
+
+| Problem Description | Possible Cause | Impact on the Extraction Process | Proposed Solution or Mitigation |
+|---|---|---|---|
+| Database Connection Failure | Incorrect database credentials, unavailable PostgreSQL server, or network connectivity problems. | The Python script cannot access the source database, preventing data extraction. | Verify the database connection settings, credentials, server availability, and network connection before rerunning the extraction. |
+| Missing Source Table or Column | A required table or column has been renamed, removed, or changed in the SmartStock database. | The extraction query may fail or retrieve incomplete data, preventing successful validation. | Validate the required tables and columns before extraction. Record the error and update the extraction script and documentation when an approved schema change occurs. |
+| Incorrect or Incomplete Incremental Extraction | The extraction window or date/timestamp field is configured incorrectly, or records are updated outside the selected extraction window. | Newly added or updated records may be omitted, resulting in incomplete data for the analytics pipeline. | Review the extraction window and applicable source date/timestamp fields. Compare extracted record counts with source query results and rerun the affected extraction when necessary. |
+| Duplicate Records in Extracted Data | The extraction query returns repeated records, or the extraction window overlaps with a previous run. | Duplicate records may affect record counts and cause inaccuracies in subsequent analysis if not identified. | Check primary key uniqueness during validation and review the extraction query and window configuration. Resolve the cause before approving the affected data. |
+| CSV Output Generation Failure | The output directory is unavailable, the Python process lacks write permission, or an error occurs while writing the file. | One or more required CSV files may be missing, incomplete, or unreadable. | Verify the output directory and write permissions. Regenerate the affected files and confirm that they are readable before proceeding to the Transformation Stage. |
+| Data Type or Format Inconsistency | Source values do not match the documented schema, or date, timestamp, and numeric values are exported in inconsistent formats. | The extracted output may fail validation or cause parsing problems during the Transformation Stage. | Check source data types and CSV output formats. Record unexpected differences, review their effects, and resolve critical issues before approving the extraction. |
+| Extraction Interruption | The Python process stops unexpectedly, the database connection is lost, or the extraction encounters an unhandled error. | The extraction may stop before all required records are retrieved or output files are completed. | Record the error in the extraction log, verify which outputs are incomplete, and rerun the extraction after resolving the cause. Do not hand over incomplete data. |
+
+## 8.2 Problem Handling and Recovery
+
+When an extraction problem occurs, the Python process should record the error and the affected source table or output file in the extraction log whenever possible. The team must determine whether the issue can be resolved by correcting the connection settings, reviewing the extraction query, adjusting the extraction window, or regenerating the output file.
+
+After resolving the problem, the affected extraction must be repeated when necessary. The required validation checks must be performed again before the extracted data is approved for the Transformation Stage. Data affected by unresolved critical problems must not proceed to the next stage.

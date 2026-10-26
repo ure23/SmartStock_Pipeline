@@ -18,6 +18,11 @@ from smartstock_pipeline.db import (
     DatabaseConnectionError,
     connect,
 )
+from smartstock_pipeline.run_metadata import (
+    ExtractionRun,
+    RunMetadataError,
+    safe_error_summary,
+)
 
 ORDERS_FIELDS = ("order_id", "customer_id", "order_date", "status", "total_amount")
 ORDER_ITEMS_FIELDS = ("order_item_id", "order_id", "product_id", "quantity", "unit_price")
@@ -130,23 +135,39 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    run = ExtractionRun(("orders", "order_items"))
+    orders_count = 0
+    items_count = 0
     try:
-        orders_count, items_count = extract_orders_and_items(
-            args.orders_output, args.order_items_output
-        )
+        with run:
+            orders_count, items_count = extract_orders_and_items(
+                args.orders_output, args.order_items_output
+            )
+            run.record_counts(
+                "orders",
+                records_read=orders_count,
+                records_extracted=orders_count,
+            )
+            run.record_counts(
+                "order_items",
+                records_read=items_count,
+                records_extracted=items_count,
+            )
     except (
         DatabaseConfigurationError,
         DatabaseConnectionError,
         ExtractionError,
+        RunMetadataError,
         OSError,
         psycopg.Error,
     ) as exc:
-        print(f"Extraction failed: {exc}", file=sys.stderr)
+        print(f"Extraction failed: {safe_error_summary(exc)}", file=sys.stderr)
         return 1
 
     print(
         f"Exported {orders_count} order(s) to {Path(args.orders_output).expanduser()} "
-        f"and {items_count} order item(s) to {Path(args.order_items_output).expanduser()}"
+        f"and {items_count} order item(s) to {Path(args.order_items_output).expanduser()} "
+        f"(run_id={run.run_id})"
     )
     return 0
 

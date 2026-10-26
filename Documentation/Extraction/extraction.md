@@ -193,26 +193,26 @@ The extraction validation checks are used to verify that the required SmartStock
 
 ## 4. Extraction Metadata and Log Specification
 
-Extraction metadata and logs will be recorded for each extraction run to support monitoring, troubleshooting, auditing, and recovery. The metadata will identify the source table, extraction timing, outcome, record counts, extraction window, and validation status of each run.
+The implemented extractors write a privacy-safe JSON metadata record when each extraction run finishes. The record contains a unique run ID, source table name(s), extraction window, UTC start/end timestamps, success/failure status, read/extracted/rejected counts, validation result, sanitized error description, and duration. The value `full_snapshot` is used because reliable incremental watermarks are not yet implemented or verified; it does not prove source completeness. A successful result means the current extractor's query, required-column/primary-key checks, and CSV write completed, not that the dataset has passed full source-to-output reconciliation.
 
 | Field Name          | Purpose                                                                 | Example Value / Format         |
 | ------------------- | ----------------------------------------------------------------------- | ------------------------------ |
 | `pipeline_run_id`   | Uniquely identifies each extraction run.                                | `RUN-20261009-001`             |
-| `table_name`        | Identifies the source table being extracted.                            | `products_materials`           |
-| `start_timestamp`   | Records when extraction begins.                                         | `2026-10-09 08:00:00`          |
-| `end_timestamp`     | Records when extraction finishes.                                       | `2026-10-09 08:00:05`          |
+| `table_names`       | Identifies the source table or tables included in the run.             | `["products_materials"]`       |
+| `start_timestamp`   | Records when extraction begins.                                         | `2026-10-09T08:00:00Z`          |
+| `end_timestamp`     | Records when extraction finishes.                                       | `2026-10-09T08:00:05Z`          |
 | `extraction_status` | Indicates whether the extraction completed successfully.                | `SUCCESS / FAILED`             |
 | `records_read`      | Number of records retrieved by the source query.                        | `250`                          |
 | `records_extracted` | Number of records successfully included in the extraction output.       | `250`                          |
 | `records_rejected`  | Number of records not included in the extraction output, if applicable. | `0`                            |
-| `extraction_window` | Specifies the date or timestamp range covered by the extraction run.    | `Configured extraction window based on the applicable source date/timestamp field` |
+| `extraction_window` | Specifies the range covered by the extraction run.                     | `full_snapshot` (no verified incremental watermark) |
 | `validation_result` | Records the outcome of extraction validation.                           | `PASS`                  |
 | `error_message`     | Documents the error encountered, if any.                                | `NULL`                         |
-| `duration`          | Records the total extraction time.                                      | `5 seconds`                    |
+| `duration_seconds` | Records the total extraction time in seconds.                           | `5.0`                          |
 
 The metadata values shown above are examples only. Actual values will depend on the results of each extraction run.
 
-The logs will cover the selected SmartStock source tables: `products_materials`, `inventory`, `orders`, `order_items`, and `stock_movements`.
+The current exporters record `products_materials`, `inventory`, `orders`, and `order_items`; the combined order run includes separate counts for both order tables. No stock-movement exporter is implemented, so stock-movement extraction and metadata remain outstanding.
 
 The extraction will use relevant available data from the selected source tables. Historical transaction and stock movement records will be extracted according to the defined extraction window and the available source data. Product and inventory records will be extracted according to the requirements of the analytics pipeline.
 
@@ -224,7 +224,7 @@ The metadata and logs will be used to monitor extraction runs, identify failed o
 
 ## 5. Log Retention and Access
 
-Extraction logs are proposed to be retained for at least 30 days after each extraction run. This retention period will allow the project team to review recent extraction activity, troubleshoot issues, support auditing, and recover from failed or incomplete extraction runs.
+The implemented extraction logs use a minimum 30-day retention period for successful runs. Expired successful JSON logs are pruned after 30 days when a later extraction run completes. Failed and unrecognized logs are retained for investigation; logs needed for an open audit, troubleshooting activity, or recovery must be preserved beyond the minimum period. The run-log directory and files are owner-restricted (directory mode `0700`, file mode `0600`) and must remain in project-controlled storage.
 
 | Requirement            | Specification                                                                                                                                        |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -236,7 +236,7 @@ Extraction logs are proposed to be retained for at least 30 days after each extr
 | Deletion Rules         | Logs must not be deleted before the end of the defined retention period or while they are still required for troubleshooting, auditing, or recovery. |
 | Responsible Process    | The designated ETL or project administrator will manage log retention, archiving, and deletion.                                                      |
 
-Operational extraction logs will follow the defined retention period. Audit records required for longer-term review may be retained beyond 30 days when necessary. Actual storage, access, archiving, and deletion procedures will follow the project's implemented configuration.
+Successful logs older than 30 days are removed only when a subsequent extraction run invokes retention cleanup. Failed, malformed, and otherwise unrecognized records are not automatically removed. Retention does not automatically know whether a successful log is still needed for an audit or recovery; operators must archive or preserve such records before cleanup. Logs are created with restrictive permissions; the authorized project operator is responsible for protecting any configured alternate log directory.
 
 ## 6. Extraction Data Contract and Naming Convention
 

@@ -58,6 +58,12 @@ python -m smartstock_pipeline.extract_orders \
 
 `orders.csv` contains `order_id`, `customer_id`, `order_date`, `status`, and `total_amount`; `order_items.csv` contains `order_item_id`, `order_id`, `product_id`, `quantity`, and `unit_price`. Both datasets are sorted by their primary keys. Required columns and unique primary keys are checked, source values are preserved without transformation, and each UTF-8 CSV is atomically replaced after successful serialization. The `order_id` field is present in both files for relationship tracking. Empty source tables produce header-only CSV files; no sample records are invented.
 
+## Extraction run metadata and log retention
+
+Each implemented exporter writes one privacy-safe JSON log per run under `logs/` in the current project directory. Set `SMARTSTOCK_LOG_DIR` to use a different project-controlled directory. Each log contains a unique run ID, table name(s), a `full_snapshot` extraction window, UTC start/end times, success/failure status, read/extracted/rejected counts, the extraction validation result, a sanitized error description, and duration. For combined order exports, counts are recorded separately for `orders` and `order_items`. The current extractors do not implement verified incremental windows; `full_snapshot` must not be interpreted as proof of completeness against an external source.
+
+The log directory is created with mode `0700` and log files with mode `0600`; logs contain metadata only, never source cell values. If the log directory is not safely owned/restricted or a run log cannot be written, the exporter returns a failure rather than treating the output as accepted. Successful logs older than 30 days are pruned when a later run completes; failed and malformed logs are retained for investigation. Do not store logs in a shared or public directory. No stock-movement exporter exists yet, so that table will not produce run logs until its extraction support is implemented.
+
 ## Approved workbook mapping and export
 
 The user-approved workbook adapter maps the staged price list and order trackers into canonical products, orders, and order items. Run the mappers in order after loading the database environment variables:

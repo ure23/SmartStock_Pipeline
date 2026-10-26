@@ -17,6 +17,11 @@ from smartstock_pipeline.db import (
     DatabaseConnectionError,
     connect,
 )
+from smartstock_pipeline.run_metadata import (
+    ExtractionRun,
+    RunMetadataError,
+    safe_error_summary,
+)
 
 TABLE_NAME = "inventory"
 FIELDS = (
@@ -107,19 +112,31 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    run = ExtractionRun((TABLE_NAME,))
+    row_count = 0
     try:
-        row_count = extract_inventory(args.output)
+        with run:
+            row_count = extract_inventory(args.output)
+            run.record_counts(
+                TABLE_NAME,
+                records_read=row_count,
+                records_extracted=row_count,
+            )
     except (
         DatabaseConfigurationError,
         DatabaseConnectionError,
         ExtractionError,
+        RunMetadataError,
         OSError,
         psycopg.Error,
     ) as exc:
-        print(f"Extraction failed: {exc}", file=sys.stderr)
+        print(f"Extraction failed: {safe_error_summary(exc)}", file=sys.stderr)
         return 1
 
-    print(f"Exported {row_count} {TABLE_NAME} row(s) to {Path(args.output).expanduser()}")
+    print(
+        f"Exported {row_count} {TABLE_NAME} row(s) to {Path(args.output).expanduser()} "
+        f"(run_id={run.run_id})"
+    )
     return 0
 
 

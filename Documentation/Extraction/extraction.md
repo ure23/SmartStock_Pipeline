@@ -38,7 +38,11 @@ Python connects to the SmartStock PostgreSQL database and retrieves newly added 
 
 **Incremental Extraction Field and Logic:**
 
-The extraction uses the approved date or timestamp field of the source records to identify newly added or updated records since the previous successful extraction run. Only records within the defined extraction window are retrieved.
+The extraction uses an appropriate timestamp field or a reliable change-tracking mechanism for each source table to identify newly added or updated records since the previous successful extraction run. The extraction window is determined using the last successful extraction timestamp.
+
+The applicable fields include `updated_at` for `products_materials` and `last_updated` for `inventory`, subject to verification. For `orders`, `order_items`, and `stock_movements`, the required change-detection mechanisms must be verified against the actual database schema to ensure that new records and subsequent updates are captured accurately.
+
+An initial extraction will establish the required starting dataset, while succeeding daily runs will retrieve only newly added or updated records. The extraction watermark will be advanced only after successful extraction and validation.
 
 **Extraction Schedule:**
 
@@ -71,6 +75,7 @@ The following limitations and assumptions apply:
 - Unexpected database schema changes may cause extraction validation to fail.
 - Database connectivity problems may interrupt an extraction run.
 - The current source schema does not contain dedicated purchase transaction tables for annual purchased-material analysis.
+- Incremental extraction requires a reliable timestamp field or change-tracking mechanism for each selected source table. Tables without an appropriate field must have their change-detection method verified or implemented before the extraction process can reliably capture updates.
 
 ## 2. Source Tables and Column Specification
 
@@ -88,7 +93,7 @@ The `products_materials` table contains information identifying and classifying 
 | `unit_price` | DECIMAL(12,2) | — | Unit price |
 | `reorder_level` | INT | — | Reorder reference level |
 | `status` | VARCHAR(30) | — | Product/material status |
-| `updated_at` | DATETIME | — | Latest update date and time |
+| `updated_at` | TIMESTAMP | — | Latest update date and time |
 
 **Reason for inclusion:** Product and material information is required to identify the items used in inventory and transaction analysis.
 
@@ -233,17 +238,19 @@ Extraction logs are proposed to be retained for at least 30 days after each extr
 
 Operational extraction logs will follow the defined retention period. Audit records required for longer-term review may be retained beyond 30 days when necessary. Actual storage, access, archiving, and deletion procedures will follow the project's implemented configuration.
 
+## 6. Extraction Data Contract and Naming Convention
+
 ### 6.1 Required Schema
 
 The extraction data contract defines the expected source tables, fields, data types, and required identifiers and constraints of the SmartStock Inventory and Delivery Tracking System Analytics Pipeline. The source data comes from the SmartStock PostgreSQL database and is prepared for CSV output.
 
 | Source | Expected Fields | Data Types | Required Identifiers and Constraints |
 |---|---|---|---|
-| `products_materials` | `product_id`, `product_name`, `category`, `unit_price`, `reorder_level`, `status`, `updated_at` | INT, VARCHAR(150), VARCHAR(100), DECIMAL(12,2), INT, VARCHAR(30), DATETIME | `product_id` — Primary Key |
-| `inventory` | `inventory_id`, `product_id`, `quantity_on_hand`, `reorder_level`, `last_updated` | INT, INT, INT, INT, DATETIME | `inventory_id` — Primary Key; `product_id` — Foreign Key referencing `products_materials.product_id` |
+| `products_materials` | `product_id`, `product_name`, `category`, `unit_price`, `reorder_level`, `status`, `updated_at` | INT, VARCHAR(150), VARCHAR(100), DECIMAL(12,2), INT, VARCHAR(30), TIMESTAMP | `product_id` — Primary Key |
+| `inventory` | `inventory_id`, `product_id`, `quantity_on_hand`, `reorder_level`, `last_updated` | INT, INT, INT, INT, TIMESTAMP | `inventory_id` — Primary Key; `product_id` — Foreign Key referencing `products_materials.product_id` |
 | `orders` | `order_id`, `customer_id`, `order_date`, `status`, `total_amount` | INT, INT, DATE, VARCHAR(30), DECIMAL(12,2) | `order_id` — Primary Key; `customer_id` — Related Identifier |
 | `order_items` | `order_item_id`, `order_id`, `product_id`, `quantity`, `unit_price` | INT, INT, INT, INT, DECIMAL(12,2) | `order_item_id` — Primary Key; `order_id` — Foreign Key referencing `orders.order_id`; `product_id` — Foreign Key referencing `products_materials.product_id` |
-| `stock_movements` | `movement_id`, `product_id`, `movement_type`, `quantity`, `movement_date`, `reference_id` | INT, INT, VARCHAR(30), INT, DATETIME, INT | `movement_id` — Primary Key; `product_id` — Foreign Key referencing `products_materials.product_id`; `reference_id` — Related Identifier |
+| `stock_movements` | `movement_id`, `product_id`, `movement_type`, `quantity`, `movement_date`, `reference_id` | INT, INT, VARCHAR(30), INT, TIMESTAMP, INT | `movement_id` — Primary Key; `product_id` — Foreign Key referencing `products_materials.product_id`; `reference_id` — Related Identifier |
 
 The expected fields and data types must follow the documented source schema. Primary keys identify individual records, while documented foreign keys establish relationships between tables. Related identifiers must be checked against the actual database schema before being treated as foreign keys. Required fields and applicable constraints must be validated during extraction, and any inconsistencies must be recorded in the extraction logs.
 
@@ -278,7 +285,7 @@ The source-to-standardized field mapping documents how source columns are repres
 | `order_items.order_item_id` | `order_item_id` | INT | INT | Direct mapping |
 | `order_items.quantity` | `quantity` | INT | INT | Direct mapping |
 | `stock_movements.movement_id` | `movement_id` | INT | INT | Direct mapping |
-| `stock_movements.movement_date` | `movement_date` | DATETIME* | DATETIME* | Direct mapping |
+| `stock_movements.movement_date` | `movement_date` | TIMESTAMP* | TIMESTAMP* | Direct mapping |
 
 The standardized column names must remain consistent throughout the extraction documentation, scripts, and output datasets. If a source column is renamed or its data type is converted, the mapping must be updated to identify the source field, standardized field, source type, target type, and mapping operation.
 
@@ -407,3 +414,13 @@ The extraction process may encounter technical problems when retrieving data fro
 When an extraction problem occurs, the Python process should record the error and the affected source table or output file in the extraction log whenever possible. The team must determine whether the issue can be resolved by correcting the connection settings, reviewing the extraction query, adjusting the extraction window, or regenerating the output file.
 
 After resolving the problem, the affected extraction must be repeated when necessary. The required validation checks must be performed again before the extracted data is approved for the Transformation Stage. Data affected by unresolved critical problems must not proceed to the next stage.
+
+## Expected Output
+
+The expected output of the Extraction Stage is a set of CSV files containing the required data from the SmartStock PostgreSQL database, specifically from the `products_materials`, `inventory`, `orders`, `order_items`, and `stock_movements` tables.
+
+The extraction process will follow the documented daily incremental extraction method using Python and SQL queries. The extracted data will undergo validation to verify record completeness, required fields, primary key uniqueness, and consistency with the defined extraction window. Extraction metadata, validation results, and logs will also be maintained to support monitoring, troubleshooting, and recovery.
+
+Once the required validation checks are satisfied, the extracted CSV files, together with their metadata, validation results, and logs, will be prepared for handover to the Transformation Stage.
+
+The Extraction Stage will preserve the original source data without performing data cleaning, standardization, or business transformations. These operations will be handled separately in the Transformation Stage.

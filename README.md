@@ -71,6 +71,18 @@ Generated IDs are persisted in `workbook_import` mapping tables. The order mappe
 
 For authorized CSV handover, set a restrictive umask and write files to a mode-0700 directory outside this repository. The exporters include only their canonical contract fields; do not commit client-derived CSVs or include row values in logs or AFFiNE. The workbook's `source_file_sha256` is a source-version fingerprint, not a row-modified timestamp, so the adapter does not claim daily incremental completeness.
 
+## Extraction contract validation
+
+Validate all five CSV contracts and the live PostgreSQL schema before handover. The validator checks exact field order and names, cell data types, PostgreSQL column types/lengths, primary keys, and documented foreign keys. It reports row/column locations only, never cell contents. It does not clean, transform, or export source data.
+
+```sh
+python -m smartstock_pipeline.validate_contract --products-materials /path/products_materials.csv --inventory /path/inventory.csv --orders /path/orders.csv --order-items /path/order_items.csv --stock-movements /path/stock_movements.csv
+```
+
+Use `--csv-only` when no database connection is needed. All five CSV paths are required; absent outputs fail validation rather than being treated as empty. The validator checks schema/data-contract conformance, not record-count completeness or source-to-file reconciliation.
+
+## Unit tests
+
 Run the unit tests with:
 
 ```sh

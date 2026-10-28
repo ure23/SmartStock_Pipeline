@@ -303,6 +303,10 @@ The extraction process will check whether the source tables, column names, data 
 
 Schema validation results and related errors will be recorded in the extraction logs to maintain consistency between the source database, extraction script, and output dataset.
 
+The implemented validator is `smartstock_pipeline.validate_contract`. It validates all five CSV contracts using exact header names/order and parses each non-empty value against the documented field type without rewriting it. It also checks PostgreSQL source column types/lengths, primary keys, and documented foreign keys before outputs are accepted. Missing tables/columns, unexpected columns, contract mismatches, malformed rows, and unreadable or missing CSV files fail validation. Error messages include table/column/row locations only and never print client cell values.
+
+The validator requires a CSV path for every contract, including `stock_movements`; it does not substitute a missing file with an empty one. `--csv-only` validates files without a database connection. Schema conformance does not establish completeness or prove that the CSV row count matches a source query; those checks remain a separate acceptance criterion. The validator preserves original source values and performs no cleaning or business transformation.
+
 # 7. Extraction Acceptance and Handover Rules
 
 The extraction stage must validate the extracted data before passing it to the Transformation Stage. These rules define the conditions for accepting, reviewing, or rejecting the extracted data to ensure that it is complete, accessible, and ready for the next stage.

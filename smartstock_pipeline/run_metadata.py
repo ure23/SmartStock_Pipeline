@@ -122,7 +122,13 @@ class ExtractionRun:
         self._counts = {name: {"records_read": 0, "records_extracted": 0, "records_rejected": 0} for name in table_names}
         self._error_message: str | None = None
         self._validation_errors: list[str] = []
+        self._validation_warnings: list[str] = []
+        self._acceptance_status: str | None = None
         self.metadata: dict[str, Any] | None = None
+
+    @property
+    def log_path(self) -> Path:
+        return self.log_dir / f"{self.run_id}.json"
 
     def __enter__(self) -> "ExtractionRun":
         self.started_at = _utc_now()
@@ -152,6 +158,18 @@ class ExtractionRun:
             raise TypeError("Validation errors must be strings")
         self._validation_errors = list(errors)
 
+    def record_validation_warnings(self, warnings: Sequence[str]) -> None:
+        """Attach non-critical, value-free diagnostics that require manual review."""
+        if any(not isinstance(warning, str) for warning in warnings):
+            raise TypeError("Validation warnings must be strings")
+        self._validation_warnings = list(warnings)
+
+    def record_acceptance_status(self, status: str) -> None:
+        """Record a pipeline acceptance status without changing validation outcome."""
+        if status not in {"APPROVED", "MANUAL REVIEW", "REJECTED"}:
+            raise ValueError("Unknown extraction acceptance status")
+        self._acceptance_status = status
+
     def __exit__(self, exc_type, exc, traceback) -> bool:
         self.ended_at = _utc_now()
         if exc is not None:
@@ -174,6 +192,11 @@ class ExtractionRun:
             "records_rejected": sum(item["records_rejected"] for item in records.values()),
             "validation_result": "FAIL" if exc is not None else "PASS",
             "validation_errors": self._validation_errors,
+            "validation_warnings": self._validation_warnings,
+            "acceptance_status": (
+                "REJECTED" if exc is not None else self._acceptance_status or "NOT_EVALUATED"
+            ),
+            "log_ref": str(self.log_path),
             "error_message": self._error_message,
             "duration_seconds": round(elapsed, 6),
         }

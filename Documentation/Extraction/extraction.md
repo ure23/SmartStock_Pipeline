@@ -44,7 +44,7 @@ The initial successful run exports the full baseline. Each later run scans all r
 
 **Extraction Schedule:**
 
-The installed host cron job runs the content-hash incremental entrypoint daily at 02:00 Asia/Manila. Each run writes an immutable, owner-only handover batch. Stage 1 does not trigger Stage 2 automatically; downstream processing must require the batch's `handover_ready.json` marker.
+The installed host cron job runs the content-hash incremental entrypoint daily at 02:00 Asia/Manila. Each run writes an immutable, owner-only handover batch and acceptance record. The `handover_ready.json` marker is present only when the batch is `APPROVED`; Stage 2 must verify that both the marker and acceptance record name the same run and say `APPROVED`. Stage 1 does not trigger Stage 2 automatically.
 
 **Current implementation status:** `smartstock_pipeline.incremental_pipeline` performs the initial baseline and subsequent content-hash delta extraction; `smartstock_pipeline.scheduled_runner` is the scheduled entrypoint. The separate `smartstock_pipeline.run_pipeline` command remains an on-demand full-snapshot batch. Incremental completeness is limited to changes visible in the selected PostgreSQL snapshot; it does not claim completeness against an external system.
 
@@ -322,7 +322,7 @@ The extracted data can proceed automatically when all critical validation checks
 - All required CSV output files are generated and readable.
 - No critical extraction errors are encountered.
 
-When all these conditions are met, the extraction status will be marked as **APPROVED**, and the data can proceed to the Transformation Stage.
+When all critical conditions are met and there are no non-critical warnings, the extraction status will be marked as **APPROVED**, and the data can proceed to the Transformation Stage. The immutable batch always records `acceptance.json`; only an `APPROVED` decision receives a `handover_ready.json` marker.
 
 ## 7.2 Manual Review
 
@@ -335,7 +335,7 @@ Examples include:
 - Non-critical warnings appear in the extraction logs.
 - Unexpected results require confirmation before the data can proceed.
 
-The pipeline must hold the affected data until an authorized team member reviews the issue. The reviewer must document the findings and decide whether the data can be accepted or must be extracted again.
+The pipeline must hold the affected data until an authorized team member reviews the issue. The reviewer must document findings and decide whether the data can be accepted or must be extracted again. For incremental runs, candidate hashes are stored separately while the prior watermark remains unchanged; new scheduled runs pause until the review is resolved. Approval commits the candidate snapshot; rejection discards it so the same changes are eligible for extraction again.
 
 **Responsible Role:** Assigned ETL Team Member or designated project team member.
 
@@ -361,10 +361,10 @@ After the extraction is approved, the extracted data and its supporting records 
 The handover must include:
 
 - **Extracted Data:** The five table CSVs (`products_materials`, `inventory`, `orders`, `order_items`, `stock_movements`) plus `deletions.csv` for removed keys. The initial batch is a full baseline; later files contain only new/changed rows.
-- **Extraction Metadata:** Pipeline run ID, source table names, UTC start/end timestamps, extraction status, full rows-read counts, changed-row counts, rejected counts, and extraction window.
-- **Validation Results:** Schema, primary-key, full-snapshot relationship, CSV, and run-log checks. These are limited to the selected database snapshot and do not prove that an upstream external source delivered every change.
-- **Extraction Logs:** Privacy-safe records of successful/failed operations, validation diagnostics, and actions needed for recovery.
-- **Handover Status:** `handover_ready.json` whose run ID matches `extraction_metadata.json`; only marked batches are eligible for downstream processing. The marker denotes technical extraction readiness, not Stage 2 business approval.
+- **Extraction Metadata:** Pipeline run ID, source table names, UTC start/end timestamps in the privacy-safe run log, extraction status, full rows-read counts, changed-row counts, rejected counts, and extraction window. `extraction_metadata.json` includes the run-log reference.
+- **Validation and Acceptance Results:** `acceptance.json` records the final decision, validation warnings, reviewer identity/note when applicable, and the run-log reference. Critical CSV/schema/relationship validation failures reject the run; non-critical schema drift or source-count mismatches hold it for review. These checks are limited to the selected database snapshot and do not prove that an upstream external source delivered every change.
+- **Extraction Logs:** Privacy-safe, owner-only records of successful/failed operations, validation diagnostics, and actions needed for recovery. A handover-ready batch requires a matching successful log record.
+- **Handover Status:** `handover_ready.json` is emitted only for `APPROVED` batches, and its run ID must match both `acceptance.json` and `extraction_metadata.json`. `MANUAL REVIEW` batches are held without this marker. The marker denotes technical extraction readiness, not Stage 2 business approval.
 
 The receiving stage must verify that the required output files and supporting records are available. Data cleaning, standardization, and business transformations will be handled in the Transformation Stage.
 
@@ -375,6 +375,14 @@ The receiving stage must verify that the required output files and supporting re
 | All required tables PASS | APPROVED | Proceed to Transformation |
 | One or more non-critical WARNING | MANUAL REVIEW | Hold pipeline |
 | One or more critical FAIL | REJECTED | Stop/retry extraction as appropriate |
+
+`MANUAL REVIEW` is used for non-critical schema drift (unexpected source columns) and aggregate source-count mismatches. The complete batch remains private and has no `handover_ready.json`. A designated reviewer records a final decision and written rationale with:
+
+```sh
+python -m smartstock_pipeline.acceptance --batch-dir /path/to/batch --decision APPROVED --reviewer "Reviewer Name" --note "Review findings and rationale"
+```
+
+The reviewer may instead pass `--decision REJECTED`. Approval rechecks required CSV contracts, primary keys and cross-file relationships (or validates the recorded full-snapshot relationship check for deltas), run metadata, and the successful run log. For incremental batches it commits candidate row-hash state and advances the watermark only after that approval; rejection discards candidate state without changing the previous watermark. The acceptance record and manifest are updated, and only an approved decision emits the handover marker. A final human decision is immutable; if the package needs correction, rerun extraction rather than rewriting an accepted batch. Critical extraction/validation failures remain unhanded and may be retried after the underlying problem is fixed.
 
 ## 7.6 Validation Summary
 

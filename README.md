@@ -84,7 +84,15 @@ python -m smartstock_pipeline.incremental_pipeline --output-dir /secure/path/bat
 
 The first successful run is a complete baseline; later runs scan a repeatable-read snapshot of all five source tables and emit only rows whose stable primary-key/content hash is new or changed. It writes deletion tombstones to `deletions.csv`, because the source has no verified per-row modified/deleted timestamps. Hashes and keys are retained only in the Pipeline database control tables `pipeline_extraction_row_state` and `pipeline_extraction_watermark`; client row values remain in the source tables. The timestamped watermark is an audit marker, not a SQL date cutoff. This content-based method detects inserts, updates, and deletions as visible in the database snapshot, but it does not prove the external source system has delivered every change.
 
-Each batch contains the five contract CSVs (delta rows after the baseline, headers always included), `deletions.csv`, `extraction_metadata.json`, and `handover_ready.json`. The output directory is mode `0700`, files are mode `0600`; failed extraction/validation or failed run logging does not produce a ready marker. If the process stops after committing its database state but before writing that marker, the next run recovers the marker only when its run ID matches the last-successful DB watermark. The downstream Transformation Stage must process only batches with a valid `handover_ready.json`; Stage 1 does not start Stage 2 automatically. Batches are retained under the handover directory without automatic deletion because the consumer/retention deadline has not been approved. Successful run metadata logs continue to follow their 30-day minimum retention policy.
+Each batch contains the five contract CSVs (delta rows after the baseline, headers always included), `deletions.csv`, `extraction_metadata.json`, and `acceptance.json`. `handover_ready.json` is added only for `APPROVED` batches; `MANUAL REVIEW` batches have no ready marker, and `REJECTED`/failed runs are not handed over. The output directory is mode `0700`, files are mode `0600`; failed extraction/validation or failed run logging does not produce a ready marker. If the process stops after committing its database state but before writing that marker, the next run recovers it only when the run ID, approved acceptance record, successful run log, and last-successful DB watermark all match. The downstream Transformation Stage must process only batches whose marker and acceptance record both say `APPROVED`; Stage 1 does not start Stage 2 automatically. Batches are retained under the handover directory without automatic deletion because the consumer/retention deadline has not been approved. Successful run metadata logs continue to follow their 30-day minimum retention policy.
+
+Non-critical schema drift and source-count mismatches are recorded as warnings and place the batch in `MANUAL REVIEW`. The complete batch remains private and has no ready marker; its candidate key/hash state is held in the Pipeline database, the committed watermark is unchanged, and later scheduled runs pause until the review is resolved. An authorized reviewer can record a final decision (with a required identity and note) using:
+
+```sh
+python -m smartstock_pipeline.acceptance --batch-dir /secure/path/batch-YYYYMMDDTHHMMSS --decision APPROVED --reviewer "Reviewer Name" --note "Documented review outcome"
+```
+
+Use `--decision REJECTED` to reject a reviewed batch. Approval revalidates the five CSV contracts and cross-file relationships, requires matching metadata and a successful restricted run log, commits the candidate snapshot state, and only then writes an `APPROVED` handover marker. Rejection discards the candidate state so the changes are re-exported after the source issue is corrected. A final reviewer decision cannot be overwritten; correct or rerun the batch instead. Critical validation failures and unsuccessful runs remain rejected and can be retried after the underlying issue is corrected.
 
 The scheduled entrypoint is:
 
@@ -151,6 +159,4 @@ The test requires the owner-only repository `.env` settings and a local
 uniquely named `smartstock_pipeline_test_*` database; it refuses remote hosts or
 other configured source databases. All fixture rows are synthetic. The test
 checks a five-table baseline, unchanged and changed deltas, deletion tombstones,
-contract headers, private output permissions, failed-schema non-publication and
-watermark stability, run metadata, and handover-marker recovery. It does not
-read or export client rows.
+contract headers, private output permissions, changed deltas held for review, review blocking and approval/rejection state transitions, retry after schema repair, failed-schema non-publication and watermark stability, run metadata, and handover-marker recovery. It does not read or export client rows.

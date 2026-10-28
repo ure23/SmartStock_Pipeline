@@ -174,9 +174,10 @@ def _format_type(row: tuple) -> str:
     return data_type
 
 
-def validate_database_contract(connection) -> list[str]:
-    """Return schema/constraint violations without reading business records."""
+def validate_database_contract_report(connection) -> tuple[list[str], list[str]]:
+    """Return critical schema errors and review warnings without reading business rows."""
     errors: list[str] = []
+    warnings: list[str] = []
     for table_name, contract in CONTRACTS.items():
         rows = connection.execute(
             """SELECT column_name, data_type, character_maximum_length,
@@ -220,7 +221,7 @@ def validate_database_contract(connection) -> list[str]:
                 errors.append(f"{table_name}.{name}: primary key column must be NOT NULL")
 
         for name in sorted(actual_names - expected_names):
-            errors.append(f"{table_name}.{name}: unexpected source column")
+            warnings.append(f"{table_name}.{name}: unexpected source column; excluded from export")
 
         constraints = connection.execute(
             """SELECT tc.constraint_type, kcu.column_name,
@@ -252,6 +253,12 @@ def validate_database_contract(connection) -> list[str]:
                 errors.append(f"{table_name}: required foreign key {foreign_key} is missing")
         for foreign_key in sorted(actual_foreign - set(contract.foreign_keys)):
             errors.append(f"{table_name}: unexpected foreign key {foreign_key}")
+    return errors, warnings
+
+
+def validate_database_contract(connection) -> list[str]:
+    """Return critical schema errors; non-critical differences are separate warnings."""
+    errors, _warnings = validate_database_contract_report(connection)
     return errors
 
 
@@ -346,8 +353,13 @@ def validate_source_counts(connection, csv_counts: Mapping[str, int]) -> list[st
     ]
 
 
-def validate_outputs(paths: Mapping[str, str | Path], connection=None) -> dict[str, int]:
-    """Validate all CSVs, source schema, and source row counts when connected."""
+def validate_outputs(
+    paths: Mapping[str, str | Path],
+    connection=None,
+    *,
+    warning_sink: list[str] | None = None,
+) -> dict[str, int]:
+    """Validate CSVs and schema; return non-critical source-schema warnings separately."""
     errors: list[str] = []
     if set(paths) != set(CONTRACTS):
         missing = sorted(set(CONTRACTS) - set(paths))
@@ -357,7 +369,12 @@ def validate_outputs(paths: Mapping[str, str | Path], connection=None) -> dict[s
         if extra:
             errors.append("Unknown CSV path(s): " + ", ".join(extra))
     if connection is not None:
-        errors.extend(validate_database_contract(connection))
+        schema_errors, schema_warnings = validate_database_contract_report(connection)
+        errors.extend(schema_errors)
+        if warning_sink is None:
+            errors.extend(schema_warnings)
+        else:
+            warning_sink.extend(schema_warnings)
 
     counts: dict[str, int] = {}
     for table_name in CONTRACTS:
@@ -374,7 +391,11 @@ def validate_outputs(paths: Mapping[str, str | Path], connection=None) -> dict[s
         except (OSError, csv.Error, UnicodeError) as exc:
             errors.append(f"Could not check CSV foreign keys ({type(exc).__name__})")
     if connection is not None and not errors:
-        errors.extend(validate_source_counts(connection, counts))
+        count_warnings = validate_source_counts(connection, counts)
+        if warning_sink is None:
+            errors.extend(count_warnings)
+        else:
+            warning_sink.extend(count_warnings)
     if errors:
         raise ContractValidationError(errors, counts)
     return counts
@@ -411,6 +432,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     run = ExtractionRun(tuple(CONTRACTS))
     counts: dict[str, int] = {}
+    validation_warnings: list[str] = []
     try:
         with run:
             try:
@@ -418,9 +440,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     counts = validate_outputs(paths)
                 else:
                     with connect() as connection:
-                        counts = validate_outputs(paths, connection)
+                        counts = validate_outputs(
+                            paths,
+                            connection,
+                            warning_sink=validation_warnings,
+                        )
             except ContractValidationError as exc:
                 run.record_validation_errors(exc.errors)
+                run.record_validation_warnings(validation_warnings)
                 for table_name, count in exc.counts.items():
                     run.record_counts(
                         table_name,
@@ -428,6 +455,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         records_extracted=count,
                     )
                 raise
+            run.record_validation_warnings(validation_warnings)
             for table_name, count in counts.items():
                 run.record_counts(
                     table_name,
@@ -446,6 +474,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ) as exc:
         print(f"Validation failed: {safe_error_summary(exc)}", file=sys.stderr)
         return 1
+    if validation_warnings:
+        for warning in validation_warnings:
+            print(f"Manual review required: {warning}", file=sys.stderr)
     print("Extraction contract validation passed: " + ", ".join(
         f"{name}={counts[name]} row(s)" for name in CONTRACTS
     ) + f" (run_id={run.run_id})")

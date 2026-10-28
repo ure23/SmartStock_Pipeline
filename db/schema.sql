@@ -65,7 +65,25 @@ CREATE TABLE IF NOT EXISTS pipeline_extraction_row_state (
     content_sha256 CHAR(64) NOT NULL,
     PRIMARY KEY (table_name, record_key)
 );
+CREATE TABLE IF NOT EXISTS pipeline_extraction_pending_run (
+    run_id TEXT PRIMARY KEY,
+    previous_run_id TEXT,
+    completed_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pipeline_extraction_pending_row_state (
+    run_id TEXT NOT NULL REFERENCES pipeline_extraction_pending_run(run_id) ON DELETE CASCADE,
+    table_name TEXT NOT NULL,
+    record_key TEXT NOT NULL,
+    content_sha256 CHAR(64) NOT NULL,
+    PRIMARY KEY (run_id, table_name, record_key)
+);
+
 COMMENT ON TABLE pipeline_extraction_watermark IS
     'Internal content-snapshot watermark; not part of the five-table CSV contract.';
 COMMENT ON TABLE pipeline_extraction_row_state IS
     'Internal primary-key/content-hash state used to emit incremental CSV batches.';
+COMMENT ON TABLE pipeline_extraction_pending_run IS
+    'A manual-review snapshot awaiting an explicit final acceptance decision.';
+COMMENT ON TABLE pipeline_extraction_pending_row_state IS
+    'Candidate primary-key/content-hash state committed only if its review batch is approved.';

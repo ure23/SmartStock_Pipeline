@@ -64,7 +64,11 @@ class RunPipelineTests(unittest.TestCase):
         ), patch("smartstock_pipeline.run_pipeline.connect"):
             self.assertEqual(run_pipeline(self.output), counts)
 
-        self.assertEqual(set(path.name for path in self.output.iterdir()), set(OUTPUT_NAMES.values()))
+        self.assertEqual(
+            set(path.name for path in self.output.iterdir()),
+            set(OUTPUT_NAMES.values())
+            | {"extraction_metadata.json", "acceptance.json", "handover_ready.json"},
+        )
         self.assertEqual(stat.S_IMODE(self.output.stat().st_mode), 0o700)
         for path in self.output.iterdir():
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
@@ -72,7 +76,31 @@ class RunPipelineTests(unittest.TestCase):
         logs = list(self.log_dir.glob("*.json"))
         self.assertEqual(len(logs), 1)
         self.assertEqual(json.loads(logs[0].read_text())["extraction_status"], "SUCCESS")
+        acceptance = json.loads((self.output / "acceptance.json").read_text())
+        marker = json.loads((self.output / "handover_ready.json").read_text())
+        self.assertEqual(acceptance["acceptance_status"], "APPROVED")
+        self.assertEqual(marker["acceptance_status"], "APPROVED")
+        self.assertEqual(marker["pipeline_run_id"], acceptance["pipeline_run_id"])
         self.assertFalse(list(self.root.glob(".handover.stage-*")))
+
+    def test_warning_batch_is_published_for_review_without_handover_marker(self) -> None:
+        counts, patches = self._export_patches()
+
+        def validate(_paths, _connection, *, warning_sink):
+            warning_sink.append("products_materials.extra: unexpected source column")
+            return counts.copy()
+
+        with patches[0], patches[1], patches[2], patches[3], patch(
+            "smartstock_pipeline.run_pipeline.validate_outputs", side_effect=validate
+        ), patch("smartstock_pipeline.run_pipeline.connect"):
+            self.assertEqual(run_pipeline(self.output), counts)
+
+        acceptance = json.loads((self.output / "acceptance.json").read_text())
+        manifest = json.loads((self.output / "extraction_metadata.json").read_text())
+        self.assertEqual(acceptance["acceptance_status"], "MANUAL REVIEW")
+        self.assertEqual(manifest["acceptance_status"], "MANUAL REVIEW")
+        self.assertEqual(acceptance["validation_warnings"], manifest["validation_warnings"])
+        self.assertFalse((self.output / "handover_ready.json").exists())
 
     def test_extraction_failure_never_publishes_partial_files(self) -> None:
         _, patches = self._export_patches()

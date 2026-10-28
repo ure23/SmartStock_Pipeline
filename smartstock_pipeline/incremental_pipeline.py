@@ -15,6 +15,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Sequence
 
+from smartstock_pipeline.acceptance import (
+    APPROVED,
+    HANDOVER_MARKER,
+    decide_acceptance,
+    record_acceptance,
+    verify_success_log,
+    write_handover_marker,
+)
 from smartstock_pipeline.db import (
     DatabaseConfig,
     DatabaseConfigurationError,
@@ -27,14 +35,15 @@ from smartstock_pipeline.validate_contract import (
     CONTRACTS,
     ContractValidationError,
     validate_csv,
-    validate_database_contract,
+    validate_database_contract_report,
 )
 
 STATE_TABLE = "pipeline_extraction_row_state"
 WATERMARK_TABLE = "pipeline_extraction_watermark"
+PENDING_RUN_TABLE = "pipeline_extraction_pending_run"
+PENDING_STATE_TABLE = "pipeline_extraction_pending_row_state"
 ADVISORY_LOCK_ID = 73194621058421
 DELETIONS_HEADER = ("table_name", "record_id")
-HANDOVER_MARKER = "handover_ready.json"
 
 
 class IncrementalPipelineError(RuntimeError):
@@ -114,6 +123,22 @@ def _ensure_state_tables(connection) -> None:
             PRIMARY KEY (table_name, record_key)
         )"""
     )
+    connection.execute(
+        f"""CREATE TABLE IF NOT EXISTS {PENDING_RUN_TABLE} (
+            run_id TEXT PRIMARY KEY,
+            previous_run_id TEXT,
+            completed_at TIMESTAMPTZ NOT NULL
+        )"""
+    )
+    connection.execute(
+        f"""CREATE TABLE IF NOT EXISTS {PENDING_STATE_TABLE} (
+            run_id TEXT NOT NULL REFERENCES {PENDING_RUN_TABLE}(run_id) ON DELETE CASCADE,
+            table_name TEXT NOT NULL,
+            record_key TEXT NOT NULL,
+            content_sha256 CHAR(64) NOT NULL,
+            PRIMARY KEY (run_id, table_name, record_key)
+        )"""
+    )
 
 
 def _load_state(connection) -> tuple[str | None, dict[str, dict[str, str]]]:
@@ -129,31 +154,6 @@ def _load_state(connection) -> tuple[str | None, dict[str, dict[str, str]]]:
         if table_name in state:
             state[table_name][record_key] = content_hash.strip()
     return previous_run_id, state
-
-
-def _write_handover_marker(directory: Path, run_id: str) -> None:
-    marker = directory / HANDOVER_MARKER
-    payload = {
-        "pipeline_run_id": run_id,
-        "handover_status": "VALIDATED",
-        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    }
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".handover-ready-", dir=directory)
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            json.dump(payload, output, sort_keys=True)
-            output.write("\n")
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, marker)
-        _fsync_directory(directory)
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def _recover_committed_handover(parent: Path, run_id: str | None) -> None:
@@ -174,20 +174,30 @@ def _recover_committed_handover(parent: Path, run_id: str | None) -> None:
         if directory_info.st_uid != os.getuid() or directory_info.st_mode & 0o077:
             continue
         manifest_path = directory / "extraction_metadata.json"
+        acceptance_path = directory / "acceptance.json"
         marker_path = directory / HANDOVER_MARKER
         if marker_path.exists() or marker_path.is_symlink():
             continue
         try:
             manifest_info = manifest_path.lstat()
+            acceptance_info = acceptance_path.lstat()
             if (not manifest_path.is_file() or manifest_path.is_symlink()
-                    or manifest_info.st_uid != os.getuid() or manifest_info.st_mode & 0o077):
+                    or manifest_info.st_uid != os.getuid() or manifest_info.st_mode & 0o077
+                    or not acceptance_path.is_file() or acceptance_path.is_symlink()
+                    or acceptance_info.st_uid != os.getuid() or acceptance_info.st_mode & 0o077):
                 continue
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
+            acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+            verify_success_log(manifest.get("log_ref"), run_id)
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
             continue
         if (manifest.get("pipeline_run_id") == run_id
-                and manifest.get("validation_result") == "PASS"):
-            _write_handover_marker(directory, run_id)
+                and manifest.get("validation_result") == "PASS"
+                and manifest.get("acceptance_status") == APPROVED
+                and acceptance.get("pipeline_run_id") == run_id
+                and acceptance.get("acceptance_status") == APPROVED
+                and acceptance.get("log_ref") == manifest.get("log_ref")):
+            write_handover_marker(directory, run_id)
 
 
 def _validate_snapshot_relationships(snapshot: dict[str, list[tuple]]) -> list[str]:
@@ -246,8 +256,11 @@ def run_incremental_pipeline(
     run: ExtractionRun | None = None
     previous_run_id: str | None = None
     source_counts: dict[str, int] = {}
+    current_state: dict[str, dict[str, str]] = {table: {} for table in CONTRACTS}
     changed_rows: dict[str, list[tuple]] = {}
     deletion_rows: list[tuple[str, str]] = []
+    validation_warnings: list[str] = []
+    acceptance_status = "REJECTED"
 
     try:
         control = connect(config)
@@ -259,6 +272,13 @@ def run_incremental_pipeline(
             raise IncrementalPipelineError("Another incremental extraction is already running")
         _ensure_state_tables(control)
         previous_run_id, old_state = _load_state(control)
+        pending_review = control.execute(
+            f"SELECT run_id FROM {PENDING_RUN_TABLE} LIMIT 1"
+        ).fetchone()
+        if pending_review:
+            raise IncrementalPipelineError(
+                "An incremental batch is awaiting manual acceptance; resolve it before the next run"
+            )
         _recover_committed_handover(destination.parent, previous_run_id)
         run = ExtractionRun(
             tuple(CONTRACTS),
@@ -271,7 +291,9 @@ def run_incremental_pipeline(
         with run:
             with connect(config) as source:
                 source.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-                schema_errors = validate_database_contract(source)
+                schema_errors, validation_warnings = validate_database_contract_report(source)
+                if validation_warnings:
+                    run.record_validation_warnings(validation_warnings)
                 if schema_errors:
                     run.record_validation_errors(schema_errors)
                     raise ContractValidationError(schema_errors)
@@ -289,8 +311,7 @@ def run_incremental_pipeline(
                 run.record_validation_errors(relationship_errors)
                 raise ContractValidationError(relationship_errors)
 
-            current_state: dict[str, dict[str, str]] = {table: {} for table in CONTRACTS}
-            changed_rows: dict[str, list[tuple]] = {table: [] for table in CONTRACTS}
+            changed_rows = {table: [] for table in CONTRACTS}
             deletion_rows: list[tuple[str, str]] = []
             source_counts: dict[str, int] = {}
             for table_name, contract in CONTRACTS.items():
@@ -337,12 +358,21 @@ def run_incremental_pipeline(
                         run.record_validation_errors([error])
                         raise ContractValidationError([error])
 
+            acceptance_status = decide_acceptance(
+                validation_passed=True,
+                warnings=validation_warnings,
+            )
+            run.record_acceptance_status(acceptance_status)
             manifest = {
                 "pipeline_run_id": run.run_id,
                 "extraction_window": run.extraction_window,
                 "previous_successful_run_id": previous_run_id,
                 "baseline": previous_run_id is None,
                 "validation_result": "PASS",
+                "full_snapshot_relationship_validation": "PASS",
+                "acceptance_status": acceptance_status,
+                "validation_warnings": validation_warnings,
+                "log_ref": str(run.log_path),
                 "source_row_counts": source_counts,
                 "extracted_row_counts": {
                     table: len(changed_rows[table]) for table in CONTRACTS
@@ -361,6 +391,14 @@ def run_incremental_pipeline(
                 output.write("\n")
             os.chmod(manifest_path, 0o600)
             os.chmod(stage, 0o700)
+            record_acceptance(
+                stage,
+                run_id=run.run_id,
+                validation_passed=True,
+                warnings=validation_warnings,
+                log_ref=str(run.log_path),
+                write_marker=False,
+            )
             _fsync_tree_files(stage)
 
             if destination.exists() or destination.is_symlink():
@@ -369,7 +407,9 @@ def run_incremental_pipeline(
             published = True
             _fsync_directory(destination.parent)
 
-            completed_at = datetime.now(timezone.utc)
+        assert run is not None
+        completed_at = datetime.now(timezone.utc)
+        if acceptance_status == APPROVED:
             with control.transaction():
                 control.execute(f"DELETE FROM {STATE_TABLE}")
                 state_rows = [
@@ -392,14 +432,31 @@ def run_incremental_pipeline(
                             last_successful_at = EXCLUDED.last_successful_at""",
                     (run.run_id, completed_at),
                 )
-            state_committed = True
-
-        assert run is not None
-        if published and state_committed:
-            _write_handover_marker(destination, run.run_id)
+        else:
+            with control.transaction():
+                control.execute(
+                    f"INSERT INTO {PENDING_RUN_TABLE} (run_id, previous_run_id, completed_at) VALUES (%s, %s, %s)",
+                    (run.run_id, previous_run_id, completed_at),
+                )
+                state_rows = [
+                    (run.run_id, table, key, digest)
+                    for table in CONTRACTS
+                    for key, digest in current_state[table].items()
+                ]
+                if state_rows:
+                    with control.cursor() as cursor:
+                        cursor.executemany(
+                            f"INSERT INTO {PENDING_STATE_TABLE} (run_id, table_name, record_key, content_sha256) VALUES (%s, %s, %s, %s)",
+                            state_rows,
+                        )
+        state_committed = True
+        if published and state_committed and acceptance_status == APPROVED:
+            write_handover_marker(destination, run.run_id)
         return {
             "pipeline_run_id": run.run_id,
             "baseline": previous_run_id is None,
+            "acceptance_status": acceptance_status,
+            "validation_warnings": validation_warnings,
             "source_counts": source_counts,
             "extracted_counts": {table: len(changed_rows[table]) for table in CONTRACTS},
             "deleted_counts": {
@@ -445,6 +502,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         "Published incremental batch "
         f"{result['pipeline_run_id']} baseline={result['baseline']} "
+        f"acceptance={result['acceptance_status']} "
         f"source_counts={result['source_counts']} "
         f"extracted_counts={result['extracted_counts']} "
         f"deleted_counts={result['deleted_counts']}"

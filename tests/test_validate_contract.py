@@ -15,6 +15,7 @@ from smartstock_pipeline.validate_contract import (
     ContractValidationError,
     validate_csv,
     validate_database_contract,
+    validate_database_contract_report,
     validate_outputs,
     validate_source_counts,
 )
@@ -112,6 +113,41 @@ class ContractValidationTests(unittest.TestCase):
 
         self.assertEqual(validate_database_contract(FakeConnection()), [])
 
+    def test_unexpected_source_column_is_a_warning_not_a_critical_failure(self) -> None:
+        def col_row(field, nullable):
+            return (
+                field.name,
+                field.data_type,
+                field.max_length,
+                field.precision,
+                field.scale,
+                nullable,
+            )
+
+        class ExtraColumnConnection:
+            def execute(self, query, params):
+                table = params[0]
+                contract = CONTRACTS[table]
+                if "information_schema.columns" in query:
+                    rows = [
+                        col_row(field, "NO" if field.name in contract.primary_key else "YES")
+                        for field in contract.fields
+                    ]
+                    if table == "products_materials":
+                        rows.append(("source_note", "text", None, None, None, "YES"))
+                    return Mock(fetchall=lambda: rows)
+                constraints: list[tuple] = [
+                    ("PRIMARY KEY", name, None, None) for name in contract.primary_key
+                ]
+                constraints.extend(("FOREIGN KEY", *fk) for fk in contract.foreign_keys)
+                return Mock(fetchall=lambda: constraints)
+
+        errors, warnings = validate_database_contract_report(ExtraColumnConnection())
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("unexpected source column; excluded from export", warnings[0])
+
     def test_missing_schema_table_fails_critical_schema_validation(self) -> None:
         class MissingTableConnection:
             def execute(self, query, params):
@@ -204,7 +240,7 @@ class ContractValidationTests(unittest.TestCase):
         self.assertEqual(counts["order_items"], 1)
         self.assertEqual(counts["inventory"], 1)
 
-    @patch("smartstock_pipeline.validate_contract.validate_database_contract", return_value=[])
+    @patch("smartstock_pipeline.validate_contract.validate_database_contract_report", return_value=([], []))
     def test_source_counts_match_validated_csv_row_counts(self, _schema_validation) -> None:
         self.write_valid_empty_outputs()
         connection = Mock()
@@ -219,8 +255,25 @@ class ContractValidationTests(unittest.TestCase):
         for table in CONTRACTS:
             self.assertIn(f"FROM {table}", query)
 
-    @patch("smartstock_pipeline.validate_contract.validate_database_contract", return_value=[])
-    def test_source_count_mismatch_fails_with_aggregate_diagnostic(self, _schema_validation) -> None:
+    @patch("smartstock_pipeline.validate_contract.validate_database_contract_report", return_value=([], []))
+    def test_source_count_mismatch_is_manual_review_warning_with_sink(self, _schema_validation) -> None:
+        self.write_valid_empty_outputs()
+        connection = Mock()
+        connection.execute.return_value.fetchall.return_value = [
+            (table, 7 if table == "orders" else 0) for table in CONTRACTS
+        ]
+        warnings: list[str] = []
+
+        counts = validate_outputs(self.paths, connection, warning_sink=warnings)
+
+        self.assertEqual(counts, {table: 0 for table in CONTRACTS})
+        self.assertEqual(
+            warnings,
+            ["orders: CSV row count 0 does not match source row count 7"],
+        )
+
+    @patch("smartstock_pipeline.validate_contract.validate_database_contract_report", return_value=([], []))
+    def test_source_count_mismatch_fails_closed_without_warning_sink(self, _schema_validation) -> None:
         self.write_valid_empty_outputs()
         connection = Mock()
         connection.execute.return_value.fetchall.return_value = [
@@ -238,8 +291,8 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assertNotIn("secret", str(raised.exception))
 
-    @patch("smartstock_pipeline.validate_contract.validate_database_contract", return_value=[])
-    def test_cli_logs_validation_failure_and_value_free_errors(self, _schema_validation) -> None:
+    @patch("smartstock_pipeline.validate_contract.validate_database_contract_report", return_value=([], []))
+    def test_cli_records_count_mismatch_as_manual_review_warning(self, _schema_validation) -> None:
         from smartstock_pipeline.validate_contract import main
 
         self.write_valid_empty_outputs()
@@ -261,15 +314,15 @@ class ContractValidationTests(unittest.TestCase):
                 with redirect_stderr(stderr):
                     result = main(arguments)
 
-        self.assertEqual(result, 1)
-        self.assertIn("orders: CSV row count 0 does not match source row count 3", stderr.getvalue())
+        self.assertEqual(result, 0)
+        self.assertIn("Manual review required: orders: CSV row count 0 does not match source row count 3", stderr.getvalue())
         self.assertNotIn("client-cell-secret", stderr.getvalue())
         logs = list(log_dir.glob("*.json"))
         self.assertEqual(len(logs), 1)
         metadata = json.loads(logs[0].read_text(encoding="utf-8"))
-        self.assertEqual(metadata["validation_result"], "FAIL")
+        self.assertEqual(metadata["validation_result"], "PASS")
         self.assertEqual(
-            metadata["validation_errors"],
+            metadata["validation_warnings"],
             ["orders: CSV row count 0 does not match source row count 3"],
         )
         self.assertEqual(metadata["records"]["orders"]["records_read"], 0)

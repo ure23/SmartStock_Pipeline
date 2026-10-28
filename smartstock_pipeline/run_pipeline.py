@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
+from smartstock_pipeline.acceptance import (
+    decide_acceptance,
+    record_acceptance,
+    write_handover_marker,
+)
 from smartstock_pipeline.db import (
     DatabaseConfig,
     DatabaseConfigurationError,
@@ -67,6 +74,8 @@ def run_pipeline(
     }
     run = ExtractionRun(tuple(CONTRACTS))
     validated_counts: dict[str, int] = {}
+    validation_warnings: list[str] = []
+    acceptance_status = "REJECTED"
     try:
         with run:
             counts: dict[str, int] = {}
@@ -89,9 +98,14 @@ def run_pipeline(
 
             try:
                 with connect(config) as connection:
-                    validated_counts = validate_outputs(output_paths, connection)
+                    validated_counts = validate_outputs(
+                        output_paths,
+                        connection,
+                        warning_sink=validation_warnings,
+                    )
             except ContractValidationError as exc:
                 run.record_validation_errors(exc.errors)
+                run.record_validation_warnings(validation_warnings)
                 raise
 
             if validated_counts != counts:
@@ -103,16 +117,50 @@ def run_pipeline(
                     if counts[table] != validated_counts[table]
                 ]
                 run.record_validation_errors(errors)
+                run.record_validation_warnings(validation_warnings)
                 raise ContractValidationError(errors, validated_counts)
 
+            run.record_validation_warnings(validation_warnings)
+            acceptance_status = decide_acceptance(
+                validation_passed=True,
+                warnings=validation_warnings,
+            )
+            run.record_acceptance_status(acceptance_status)
             for path in output_paths.values():
                 os.chmod(path, 0o600)
+
+            manifest = {
+                "pipeline_run_id": run.run_id,
+                "extraction_window": "full_snapshot",
+                "validation_result": "PASS",
+                "acceptance_status": acceptance_status,
+                "validation_warnings": validation_warnings,
+                "source_row_counts": counts,
+                "extracted_row_counts": validated_counts,
+                "log_ref": str(run.log_path),
+                "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+            manifest_path = stage / "extraction_metadata.json"
+            with manifest_path.open("x", encoding="utf-8") as output:
+                json.dump(manifest, output, ensure_ascii=False, sort_keys=True)
+                output.write("\n")
+            os.chmod(manifest_path, 0o600)
             os.chmod(stage, 0o700)
+            record_acceptance(
+                stage,
+                run_id=run.run_id,
+                validation_passed=True,
+                warnings=validation_warnings,
+                log_ref=str(run.log_path),
+                write_marker=False,
+            )
             if destination.exists() or destination.is_symlink():
                 raise PipelineError("Output directory appeared during the run; refusing publication")
             os.rename(stage, destination)
             published = True
 
+        if acceptance_status == "APPROVED":
+            write_handover_marker(destination, run.run_id)
         return validated_counts
     except Exception as exc:
         if published:

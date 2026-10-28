@@ -146,7 +146,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     print(
         f"Scheduled batch {result['pipeline_run_id']} published to {result['output_dir']}; "
-        f"baseline={result['baseline']} extracted_counts={result['extracted_counts']} "
+        f"baseline={result['baseline']} acceptance={result['acceptance_status']} "
+        f"extracted_counts={result['extracted_counts']} "
         f"deleted_counts={result['deleted_counts']}"
     )
     return 0

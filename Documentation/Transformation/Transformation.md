@@ -2,20 +2,20 @@
 
 **Project:** SmartStock: An Inventory and Delivery Tracking System with AI-Assisted Analytics  
 **Pipeline stage:** Stage 2 — Transformation  
-**Documentation status:** Proposed documentation before implementation; actual profiling, validation results, and logs will be supplied after the pipeline runs.  
+**Documentation status:** Stage 2 design documentation; the SmartStock Stage 1 incremental runner and daily schedule are implemented. Transformation execution remains outside this repository's Stage 1 scope.
 **Related document:** `Extraction/extraction.md` (Stage 1)
 
 ## Objective
 
 The objective of this stage is to transform the validated datasets handed over by the SmartStock Extraction Stage into cleaned, standardized, and business-ready datasets. This stage documents data profiling, cleaning, standardization, joins, derived values, aggregations, output contracts, validation, logs, and the criteria for handing approved outputs to the Load Stage. It does **not** retrieve data directly from PostgreSQL or load transformed data into the final target database.
 
-> **Implementation alignment note:** Stage 1 uses Python and SQL for **daily incremental extraction** (following an initial baseline extraction) of `products_materials`, `inventory`, `orders`, `order_items`, and `stock_movements`. The existing Extraction document specifies CSV handover and extraction metadata, but it does not confirm exact physical filenames, folders, execution clock time, or implemented run-ID conventions. File paths below are **proposals**, while the example extraction run-ID format follows Stage 1. Verify all of these with the implemented Stage 1 output. Column names below use the previously documented extraction data contract. Any different name in the final validated handover must be reconciled before coding.
+> **Implementation alignment note:** Stage 1 runs daily at 02:00 Asia/Manila through the content-hash incremental runner, after an initial full baseline. Each run compares a repeatable-read PostgreSQL snapshot with database-resident primary-key/content-hash state, exports only new/changed rows, and writes deleted-key tombstones. The Stage 1 handover root is `~/.local/share/smartstock-pipeline/handover/`; each immutable `batch-<YYYYMMDDTHHMMSS+0800>/` directory includes the five table CSVs, `deletions.csv`, `extraction_metadata.json`, and `handover_ready.json`. The ready marker is the handover acceptance gate: Stage 2 must ignore batches without a valid marker. The extraction window is `initial_baseline` or `content_changes_since:<previous_run_id>`; the recorded last-successful run/time is not a source-date cutoff. Every run scans all source rows for changes, so the method detects only changes visible in the selected PostgreSQL snapshot, not changes missing from the external source. Batch outputs are owner-restricted and retained without automatic deletion. Stage 1 does not invoke Stage 2.
 
 ## 1. Transformation Input and Processing Specification
 
 ### 1.1 Input Source
 
-Stage 2 receives the **validated handover output** of Stage 1, rather than querying the SmartStock source database again. The handover contains data corresponding to the five extracted tables, together with extraction metadata and validation results. The documented input format is CSV, accompanied by the Stage 1 extraction metadata, validation results, logs, and acceptance decision. A JSON manifest is an **optional proposed packaging improvement**, not a file already confirmed in Stage 1. Final filenames must match the actual Stage 1 handover.
+Stage 2 receives the **validated handover output** of Stage 1, rather than querying the SmartStock source database again. A processable batch contains the five table CSVs, `deletions.csv` tombstones, `extraction_metadata.json`, and a valid `handover_ready.json`. The first batch is a full baseline; subsequent table CSVs contain only new/changed rows, so Stage 2 must apply updates by primary key and apply tombstones to its cumulative reference state. Stage 2 must ignore any directory without the marker or whose marker run ID does not match its manifest.
 
 | Validated Stage 1 dataset | Fields expected from extraction contract | Use in transformation |
 | --- | --- | --- |
@@ -24,41 +24,44 @@ Stage 2 receives the **validated handover output** of Stage 1, rather than query
 | `orders` | `order_id`, `customer_id`, `order_date`, `status`, `total_amount` | Order dates, statuses, and order-level references |
 | `order_items` | `order_item_id`, `order_id`, `product_id`, `quantity`, `unit_price` | Item-level quantities and sales amounts |
 | `stock_movements` | `movement_id`, `product_id`, `movement_type`, `quantity`, `movement_date`, `reference_id` | Quantified inward/outward stock movements |
+| `deletions.csv` | `table_name`, `record_id` | Remove source keys from cumulative Stage 2 reference state |
 
-**Proposed logical handover layout** (adjust to the actual Extraction documentation):
+**Stage 1 handover layout:**
 
 ```text
-pipeline/
-  handover/extraction/<extraction_run_id>/
-    products_materials.csv
-    inventory.csv
-    orders.csv
-    order_items.csv
-    stock_movements.csv
-    extraction_metadata.json  # proposed representation of Stage 1 metadata
-  handover/transformation/<transformation_run_id>/
-    ... approved transformed datasets and validation manifest ...
+~/.local/share/smartstock-pipeline/
+  handover/
+    batch-<YYYYMMDDTHHMMSS+0800>/
+      products_materials.csv
+      inventory.csv
+      orders.csv
+      order_items.csv
+      stock_movements.csv
+      deletions.csv
+      extraction_metadata.json
+      handover_ready.json
+  logs/
 ```
 
-The Stage 2 `parent_run_id` references the Stage 1 **`pipeline_run_id`**. The Stage 1 **`extraction_window`** is copied into the Stage 2 batch metadata; do not invent or enlarge its date range. Example ID format from the Stage 1 documentation: `parent_run_id=RUN-20261009-001` (illustrative only). If the metadata provides window boundaries, retain their exact values and time-zone interpretation.
+The Stage 2 `parent_run_id` references the Stage 1 `pipeline_run_id` in `extraction_metadata.json` and must match `handover_ready.json`. Copy the Stage 1 `extraction_window` exactly; do not invent or enlarge it. Current run IDs use the `RUN-<uuid>` format. The extraction window is `initial_baseline` or `content_changes_since:<previous_run_id>` and has no source timestamp boundaries.
 
-Stage 2 starts only when the **Stage 1 acceptance/handover status is APPROVED**, its required CSV files are readable, and its metadata/validation records are available. A manifest is useful but not mandatory if Stage 1 stores these records in another approved format.
+Stage 2 starts only for a batch with a `handover_ready.json` whose `pipeline_run_id` matches the metadata manifest, and whose required files are readable. The marker means Stage 1 technical extraction/schema/relationship validation and run logging completed; it is not a business approval or a claim of external-source completeness. Stage 2 retains its own profiling, data-quality review, and acceptance decision.
 
 ### 1.2 Batch Processing Method
 
 | Item | Specification |
 | --- | --- |
 | Tool/technology | Proposed Python batch transformation using `pandas` for CSV profiling, cleaning, joining, and aggregation; built-in Python logging/JSON for run manifests |
-| Frequency | Daily, after successful Stage 1 incremental extraction and validation |
-| Schedule | Dependency-based: start upon approval of Stage 1 handover. Configure the clock time to match Stage 1; do not assume a fixed time until scheduled. |
+| Frequency | Stage 1 batches run daily; Stage 2 is not automatically triggered and should process validated batches through an approved consumer |
+| Schedule | Stage 1 runs at 02:00 Asia/Manila; Stage 2 may begin only after a ready marker is published |
 | Batch window | The `extraction_window` recorded in the accepted Stage 1 metadata, including any initial-baseline indicator |
-| Processing unit | One accepted extraction batch and its five files, plus approved reference data required to resolve incremental joins |
+| Processing unit | One Stage 1 validated batch: five table CSVs, `deletions.csv`, extraction metadata, and the matching readiness marker, plus approved historical reference state required for incremental joins |
 | Retry approach | Reprocess the same validated input and same rule version, using a new attempt number linked to the same batch; retain failure logs |
 | Idempotency | Replace the **same batch's temporary/output files atomically** (rather than append), and use stable source identifiers for deduplication. The same batch and rule version must not create repeated rows or multiply totals. |
 
 Because an incremental `order_items` file may not contain its parent `orders` row (or a product row), Stage 2 uses the **latest previously approved cumulative reference state** plus applicable incremental updates. This reference state must be established using the initial baseline and previously accepted increments, and retained as an approved pipeline artifact; Stage 2 does not requery PostgreSQL. If required parent rows are unavailable, related records are quarantined or the batch is held for review rather than silently discarded.
 
-**Cumulative-state requirement:** The initial baseline and previously approved incremental records must be combined by source primary key to provide the latest approved state; incremental files alone are **not** sufficient for lifetime/monthly summaries or parent lookups. Persist this state as a controlled Stage 2 working reference or receive it as an approved historical handover, without querying PostgreSQL. Apply each changed source key as an update, not an additional historical sale.
+**Cumulative-state requirement:** The initial baseline and previously approved incremental records must be combined by source primary key to provide the latest approved state; apply each new/changed row as an upsert and each `deletions.csv` row as a keyed removal. Incremental files alone are **not** sufficient for lifetime/monthly summaries or parent lookups. Persist this state as a controlled Stage 2 working reference or receive it as an approved historical handover, without querying PostgreSQL. Apply each changed source key as an update, not an additional historical sale.
 
 **Late changes:** If an older order or stock-movement record is updated and included in a later incremental batch, recompute the affected output keys and affected monthly aggregates using the approved historical state. For an order-date or order-status change, recompute both the original affected reporting month (when known) and the new reporting month. Do not treat the incremental batch alone as the whole historical dataset.
 

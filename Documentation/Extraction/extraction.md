@@ -38,15 +38,15 @@ Python connects to the SmartStock PostgreSQL database and retrieves newly added 
 
 **Incremental Extraction Field and Logic:**
 
-The extraction uses an appropriate timestamp field or a reliable change-tracking mechanism for each source table to identify newly added or updated records since the previous successful extraction run. The extraction window is determined using the last successful extraction timestamp.
+The current schema does not provide a reliable row-modified timestamp across all five tables. `products_materials.updated_at` and `inventory.last_updated` exist in the contract but are not consistently populated or verified as change watermarks; `orders.order_date` and `stock_movements.movement_date` are business-event dates, not update timestamps; `order_items` has no documented modified-at field. Stage 1 therefore uses a database-resident content snapshot: under one repeatable-read source snapshot, it hashes canonical contract values per stable primary key and compares them with the prior successful snapshot. New and changed rows are exported; removed keys are emitted as deletion tombstones. The DB watermark stores the last successful run ID/time, not a source timestamp cutoff.
 
-The applicable fields include `updated_at` for `products_materials` and `last_updated` for `inventory`, subject to verification. For `orders`, `order_items`, and `stock_movements`, the required change-detection mechanisms must be verified against the actual database schema to ensure that new records and subsequent updates are captured accurately.
-
-An initial extraction will establish the required starting dataset, while succeeding daily runs will retrieve only newly added or updated records. The extraction watermark will be advanced only after successful extraction and validation.
+The initial successful run exports the full baseline. Each later run scans all rows to detect changes, but exports only new/changed records plus deletions. Source keys and SHA-256 row hashes remain in Pipeline database control tables; source row values remain in the canonical source tables. This detects changes visible in the selected database, not changes that have not yet reached it. Failed validation does not advance the watermark; unchanged rows are not re-exported. Downstream consumers must apply updates/deletion tombstones idempotently by stable primary key.
 
 **Extraction Schedule:**
 
-The extraction is performed as a daily batch process to retrieve newly added or updated SmartStock records for the analytics process.
+The installed host cron job runs the content-hash incremental entrypoint daily at 02:00 Asia/Manila. Each run writes an immutable, owner-only handover batch and acceptance record. The `handover_ready.json` marker is present only when the batch is `APPROVED`; Stage 2 must verify that both the marker and acceptance record name the same run and say `APPROVED`. Stage 1 does not trigger Stage 2 automatically.
+
+**Current implementation status:** `smartstock_pipeline.incremental_pipeline` performs the initial baseline and subsequent content-hash delta extraction; `smartstock_pipeline.scheduled_runner` is the scheduled entrypoint. The separate `smartstock_pipeline.run_pipeline` command remains an on-demand full-snapshot batch. Incremental completeness is limited to changes visible in the selected PostgreSQL snapshot; it does not claim completeness against an external system.
 
 ### 1.4 Extraction Scope
 
@@ -69,13 +69,13 @@ The following limitations and assumptions apply:
 - SmartStock records must be available in PostgreSQL before extraction begins.
 - Python must be able to establish a valid connection to PostgreSQL.
 - Required source tables and columns must exist.
-- The incremental extraction depends on the approved date or timestamp field used to identify newly added or updated records.
-- The extraction window must be maintained based on the previous successful extraction run.
+- The incremental extraction detects content changes in the current database snapshot using stable primary keys and SHA-256 hashes of canonical row values; no verified row-modified timestamp is available across the five tables.
+- The previous successful run ID and hash state are maintained in the Pipeline database. Failed validation or export does not advance this state.
 - Historical records are limited to the data available in the source database.
 - Unexpected database schema changes may cause extraction validation to fail.
 - Database connectivity problems may interrupt an extraction run.
 - The current source schema does not contain dedicated purchase transaction tables for annual purchased-material analysis.
-- Incremental extraction requires a reliable timestamp field or change-tracking mechanism for each selected source table. Tables without an appropriate field must have their change-detection method verified or implemented before the extraction process can reliably capture updates.
+- Incremental extraction requires stable primary keys and a repeatable-read database snapshot; when source-modified timestamps are unavailable, content hashes identify new, updated, and deleted records visible in PostgreSQL.
 
 ## 2. Source Tables and Column Specification
 
@@ -125,7 +125,7 @@ The `orders` table contains customer order and transaction information.
 | `customer_id` | INT | Foreign Key | Identifies the related customer |
 | `order_date` | DATE | — | Date the order was placed |
 | `status` | VARCHAR(30) | — | Current order status |
-| `total_amount` | DECIMAL(12,2) | — | Total order amount |
+| `total_amount` | NUMERIC | — | Total order amount |
 
 **Reason for inclusion:** Order records are required for monthly sales and transaction analysis.
 
@@ -140,7 +140,7 @@ The `order_items` table contains the individual products/materials included in e
 | `order_item_id` | INT | Primary Key | Unique order item identifier |
 | `order_id` | INT | Foreign Key → orders(order_id) | Identifies the related order |
 | `product_id` | INT | Foreign Key → products_materials(product_id) | Identifies the related product/material |
-| `quantity` | INT | — | Quantity ordered |
+| `quantity` | NUMERIC | — | Quantity ordered |
 | `unit_price` | DECIMAL(12,2) | — | Unit price |
 
 **Reason for inclusion:** Order item records are required to analyze product-level transaction quantities and support demand forecasting.
@@ -184,8 +184,8 @@ The extraction validation checks are used to verify that the required SmartStock
 | Required Columns | Selected columns from the source tables | Verify that the fields required for extraction exist | All documented required columns are present and accessible |
 | Required Identifiers | Primary and foreign key columns | Verify that records can be identified and related during extraction | Required identifier columns are present in the extracted data |
 | Primary Key Uniqueness | Primary key columns | Verify that source records have unique identifiers | No duplicate primary key values are found within the extracted records |
-| Record Count | Source query results and extracted data | Verify that the expected records are retrieved | The number of records extracted matches the records returned by the source extraction query |
-| Extraction Completeness | Extraction result | Verify that the incremental extraction was completed for the defined extraction window | All records within the defined extraction window are successfully extracted |
+| Record Count | Repeatable-read source snapshot, changed-row CSVs, and deletion tombstones | Reconcile per-table snapshot/read and emitted counts | Metadata reports the full source row counts scanned, changed rows exported, and deleted keys; these are separate measures and are not expected to be equal |
+| Extraction Completeness | Full repeatable-read source snapshot and prior hash state | Verify the complete set of changes visible in this database snapshot | Every new/changed row and deleted key is emitted; unchanged rows are skipped. This does not prove external-source delivery completeness. |
 | Extraction Error Check | Python extraction process | Detect errors that occur while retrieving source data | No unhandled extraction errors are encountered |
 | Extraction Interruption Check | Extraction run | Verify that the extraction process finishes successfully | The extraction run completes without interruption |
 
@@ -193,38 +193,37 @@ The extraction validation checks are used to verify that the required SmartStock
 
 ## 4. Extraction Metadata and Log Specification
 
-Extraction metadata and logs will be recorded for each extraction run to support monitoring, troubleshooting, auditing, and recovery. The metadata will identify the source table, extraction timing, outcome, record counts, extraction window, and validation status of each run.
+The implemented exporters, contract validator, and incremental runner write a privacy-safe JSON metadata record when each run finishes. The incremental record carries `initial_baseline` or `content_changes_since:<previous_run_id>`; its `records_read` counts reflect the full source snapshot scanned, while `records_extracted` counts only new/changed rows. Deletions are reported separately in the batch manifest and `deletions.csv`. The successful run ID/time and row hashes are stored in database control tables, and the handover-ready marker is written only after validation, state commit, and successful run logging. These checks establish the batch's schema/relationship validity and content-diff processing against the current database snapshot; they do not establish completeness against an external source.
 
 | Field Name          | Purpose                                                                 | Example Value / Format         |
 | ------------------- | ----------------------------------------------------------------------- | ------------------------------ |
 | `pipeline_run_id`   | Uniquely identifies each extraction run.                                | `RUN-20261009-001`             |
-| `table_name`        | Identifies the source table being extracted.                            | `products_materials`           |
-| `start_timestamp`   | Records when extraction begins.                                         | `2026-10-09 08:00:00`          |
-| `end_timestamp`     | Records when extraction finishes.                                       | `2026-10-09 08:00:05`          |
+| `table_names`       | Identifies the source table or tables included in the run.             | `["products_materials"]`       |
+| `start_timestamp`   | Records when extraction begins.                                         | `2026-10-09T08:00:00Z`          |
+| `end_timestamp`     | Records when extraction finishes.                                       | `2026-10-09T08:00:05Z`          |
 | `extraction_status` | Indicates whether the extraction completed successfully.                | `SUCCESS / FAILED`             |
 | `records_read`      | Number of records retrieved by the source query.                        | `250`                          |
 | `records_extracted` | Number of records successfully included in the extraction output.       | `250`                          |
 | `records_rejected`  | Number of records not included in the extraction output, if applicable. | `0`                            |
-| `extraction_window` | Specifies the date or timestamp range covered by the extraction run.    | `Configured extraction window based on the applicable source date/timestamp field` |
+| `extraction_window` | Specifies baseline or last successful content-snapshot run | `initial_baseline` or `content_changes_since:RUN-...` |
 | `validation_result` | Records the outcome of extraction validation.                           | `PASS`                  |
 | `error_message`     | Documents the error encountered, if any.                                | `NULL`                         |
-| `duration`          | Records the total extraction time.                                      | `5 seconds`                    |
+| `validation_errors` | Stores table/column/row-level validation diagnostics without cell values. | `[]` or value-free location messages |
+| `duration_seconds` | Records the total extraction time in seconds.                           | `5.0`                          |
 
 The metadata values shown above are examples only. Actual values will depend on the results of each extraction run.
 
-The logs will cover the selected SmartStock source tables: `products_materials`, `inventory`, `orders`, `order_items`, and `stock_movements`.
+The current exporters record `products_materials`, `inventory`, `orders`, `order_items`, and `stock_movements`; the combined order run includes separate counts for both order tables. The validator records a separate validation-run log, including value-free failure diagnostics, and compares aggregate per-table CSV and source row counts when connected to PostgreSQL. The stock-movement exporter is implemented, but the workbook does not provide movement records and the canonical source table is currently empty, so populated movement extraction is unverified.
 
-The extraction will use relevant available data from the selected source tables. Historical transaction and stock movement records will be extracted according to the defined extraction window and the available source data. Product and inventory records will be extracted according to the requirements of the analytics pipeline.
+The initial baseline includes all currently available rows in the five selected tables. Later batches contain changed rows plus deletion tombstones. Actual record coverage remains limited to the records present in the selected PostgreSQL snapshot when the repeatable-read transaction begins.
 
-The actual historical data coverage may vary between source tables depending on the records available in the SmartStock PostgreSQL database. The extraction process will not assume that all tables contain the same number of records or cover the same number of years.
-
-For incremental extraction, the extraction window will be based on the applicable source date or timestamp field and the previous successful extraction run. The initial extraction period and subsequent extraction windows will be defined according to the available source data and pipeline configuration.
+The content-hash window compares the current snapshot with the previous successfully committed hash state. The database records the last successful run ID/time, but does not use a source date/timestamp as a cutoff. The scheduled run time is 02:00 Asia/Manila; the full source tables are scanned to detect updates and deletes that may affect older business dates.
 
 The metadata and logs will be used to monitor extraction runs, identify failed or incomplete extractions, support troubleshooting, provide an audit trail, and assist in recovery or reruns when an extraction does not complete successfully.
 
 ## 5. Log Retention and Access
 
-Extraction logs are proposed to be retained for at least 30 days after each extraction run. This retention period will allow the project team to review recent extraction activity, troubleshoot issues, support auditing, and recover from failed or incomplete extraction runs.
+The implemented extraction logs use a minimum 30-day retention period for successful runs. Expired successful JSON logs are pruned after 30 days when a later extraction run completes. Failed and unrecognized logs are retained for investigation; logs needed for an open audit, troubleshooting activity, or recovery must be preserved beyond the minimum period. The run-log directory and files are owner-restricted (directory mode `0700`, file mode `0600`) and must remain in project-controlled storage.
 
 | Requirement            | Specification                                                                                                                                        |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -236,7 +235,7 @@ Extraction logs are proposed to be retained for at least 30 days after each extr
 | Deletion Rules         | Logs must not be deleted before the end of the defined retention period or while they are still required for troubleshooting, auditing, or recovery. |
 | Responsible Process    | The designated ETL or project administrator will manage log retention, archiving, and deletion.                                                      |
 
-Operational extraction logs will follow the defined retention period. Audit records required for longer-term review may be retained beyond 30 days when necessary. Actual storage, access, archiving, and deletion procedures will follow the project's implemented configuration.
+Successful logs older than 30 days are removed only when a subsequent extraction run invokes retention cleanup. Failed, malformed, and otherwise unrecognized records are not automatically removed. Retention does not automatically know whether a successful log is still needed for an audit or recovery; operators must archive or preserve such records before cleanup. Logs are created with restrictive permissions; the authorized project operator is responsible for protecting any configured alternate log directory.
 
 ## 6. Extraction Data Contract and Naming Convention
 
@@ -248,8 +247,8 @@ The extraction data contract defines the expected source tables, fields, data ty
 |---|---|---|---|
 | `products_materials` | `product_id`, `product_name`, `category`, `unit_price`, `reorder_level`, `status`, `updated_at` | INT, VARCHAR(150), VARCHAR(100), DECIMAL(12,2), INT, VARCHAR(30), TIMESTAMP | `product_id` — Primary Key |
 | `inventory` | `inventory_id`, `product_id`, `quantity_on_hand`, `reorder_level`, `last_updated` | INT, INT, INT, INT, TIMESTAMP | `inventory_id` — Primary Key; `product_id` — Foreign Key referencing `products_materials.product_id` |
-| `orders` | `order_id`, `customer_id`, `order_date`, `status`, `total_amount` | INT, INT, DATE, VARCHAR(30), DECIMAL(12,2) | `order_id` — Primary Key; `customer_id` — Related Identifier |
-| `order_items` | `order_item_id`, `order_id`, `product_id`, `quantity`, `unit_price` | INT, INT, INT, INT, DECIMAL(12,2) | `order_item_id` — Primary Key; `order_id` — Foreign Key referencing `orders.order_id`; `product_id` — Foreign Key referencing `products_materials.product_id` |
+| `orders` | `order_id`, `customer_id`, `order_date`, `status`, `total_amount` | INT, INT, DATE, VARCHAR(30), NUMERIC | `order_id` — Primary Key; `customer_id` — Related Identifier |
+| `order_items` | `order_item_id`, `order_id`, `product_id`, `quantity`, `unit_price` | INT, INT, INT, NUMERIC, DECIMAL(12,2) | `order_item_id` — Primary Key; `order_id` — Foreign Key referencing `orders.order_id`; `product_id` — Foreign Key referencing `products_materials.product_id` |
 | `stock_movements` | `movement_id`, `product_id`, `movement_type`, `quantity`, `movement_date`, `reference_id` | INT, INT, VARCHAR(30), INT, TIMESTAMP, INT | `movement_id` — Primary Key; `product_id` — Foreign Key referencing `products_materials.product_id`; `reference_id` — Related Identifier |
 
 The expected fields and data types must follow the documented source schema. Primary keys identify individual records, while documented foreign keys establish relationships between tables. Related identifiers must be checked against the actual database schema before being treated as foreign keys. Required fields and applicable constraints must be validated during extraction, and any inconsistencies must be recorded in the extraction logs.
@@ -303,6 +302,10 @@ The extraction process will check whether the source tables, column names, data 
 
 Schema validation results and related errors will be recorded in the extraction logs to maintain consistency between the source database, extraction script, and output dataset.
 
+The implemented validator is `smartstock_pipeline.validate_contract`. It validates all five CSV contracts using exact header names/order and parses each non-empty value against the documented field type without rewriting it. It checks that exported foreign-key values resolve to primary keys in the related CSVs, and checks PostgreSQL source column types/lengths, primary keys, and documented foreign keys. In database-backed mode, it compares each validated CSV row count with the corresponding source-table `COUNT(*)` values returned by one SQL statement snapshot. Error messages contain table/column/row locations and aggregate counts only; they never print client cell values.
+
+The validator requires a CSV path for every contract, including `stock_movements`; it does not substitute a missing file with an empty one. `--csv-only` validates file contracts without a database connection and skips source-schema/count checks. Database-backed count reconciliation checks aggregate row totals, not row-by-row identity, incremental watermark coverage, or completeness against an external source. The validator preserves original source values and performs no cleaning or business transformation.
+
 # 7. Extraction Acceptance and Handover Rules
 
 The extraction stage must validate the extracted data before passing it to the Transformation Stage. These rules define the conditions for accepting, reviewing, or rejecting the extracted data to ensure that it is complete, accessible, and ready for the next stage.
@@ -319,7 +322,7 @@ The extracted data can proceed automatically when all critical validation checks
 - All required CSV output files are generated and readable.
 - No critical extraction errors are encountered.
 
-When all these conditions are met, the extraction status will be marked as **APPROVED**, and the data can proceed to the Transformation Stage.
+When all critical conditions are met and there are no non-critical warnings, the extraction status will be marked as **APPROVED**, and the data can proceed to the Transformation Stage. The immutable batch always records `acceptance.json`; only an `APPROVED` decision receives a `handover_ready.json` marker.
 
 ## 7.2 Manual Review
 
@@ -332,7 +335,7 @@ Examples include:
 - Non-critical warnings appear in the extraction logs.
 - Unexpected results require confirmation before the data can proceed.
 
-The pipeline must hold the affected data until an authorized team member reviews the issue. The reviewer must document the findings and decide whether the data can be accepted or must be extracted again.
+The pipeline must hold the affected data until an authorized team member reviews the issue. The reviewer must document findings and decide whether the data can be accepted or must be extracted again. For incremental runs, candidate hashes are stored separately while the prior watermark remains unchanged; new scheduled runs pause until the review is resolved. Approval commits the candidate snapshot; rejection discards it so the same changes are eligible for extraction again.
 
 **Responsible Role:** Assigned ETL Team Member or designated project team member.
 
@@ -357,11 +360,11 @@ After the extraction is approved, the extracted data and its supporting records 
 
 The handover must include:
 
-- **Extracted Data:** CSV output files containing records from `products_materials`, `inventory`, `orders`, `order_items`, and `stock_movements`.
-- **Extraction Metadata:** Pipeline run ID, source table name, start and end timestamps, extraction status, record counts, and extraction window.
-- **Validation Results:** Results of the required table, column, identifier, primary key uniqueness, record count, and extraction completeness checks.
-- **Extraction Logs:** Records of successful operations, warnings, errors, and actions taken to resolve issues.
-- **Handover Status:** The final acceptance decision indicating whether the extracted data is approved to proceed to the Transformation Stage.
+- **Extracted Data:** The five table CSVs (`products_materials`, `inventory`, `orders`, `order_items`, `stock_movements`) plus `deletions.csv` for removed keys. The initial batch is a full baseline; later files contain only new/changed rows.
+- **Extraction Metadata:** Pipeline run ID, source table names, UTC start/end timestamps in the privacy-safe run log, extraction status, full rows-read counts, changed-row counts, rejected counts, and extraction window. `extraction_metadata.json` includes the run-log reference.
+- **Validation and Acceptance Results:** `acceptance.json` records the final decision, validation warnings, reviewer identity/note when applicable, and the run-log reference. Critical CSV/schema/relationship validation failures reject the run; non-critical schema drift or source-count mismatches hold it for review. These checks are limited to the selected database snapshot and do not prove that an upstream external source delivered every change.
+- **Extraction Logs:** Privacy-safe, owner-only records of successful/failed operations, validation diagnostics, and actions needed for recovery. A handover-ready batch requires a matching successful log record.
+- **Handover Status:** `handover_ready.json` is emitted only for `APPROVED` batches, and its run ID must match both `acceptance.json` and `extraction_metadata.json`. `MANUAL REVIEW` batches are held without this marker. The marker denotes technical extraction readiness, not Stage 2 business approval.
 
 The receiving stage must verify that the required output files and supporting records are available. Data cleaning, standardization, and business transformations will be handled in the Transformation Stage.
 
@@ -372,6 +375,14 @@ The receiving stage must verify that the required output files and supporting re
 | All required tables PASS | APPROVED | Proceed to Transformation |
 | One or more non-critical WARNING | MANUAL REVIEW | Hold pipeline |
 | One or more critical FAIL | REJECTED | Stop/retry extraction as appropriate |
+
+`MANUAL REVIEW` is used for non-critical schema drift (unexpected source columns) and aggregate source-count mismatches. The complete batch remains private and has no `handover_ready.json`. A designated reviewer records a final decision and written rationale with:
+
+```sh
+python -m smartstock_pipeline.acceptance --batch-dir /path/to/batch --decision APPROVED --reviewer "Reviewer Name" --note "Review findings and rationale"
+```
+
+The reviewer may instead pass `--decision REJECTED`. Approval rechecks required CSV contracts, primary keys and cross-file relationships (or validates the recorded full-snapshot relationship check for deltas), run metadata, and the successful run log. For incremental batches it commits candidate row-hash state and advances the watermark only after that approval; rejection discards candidate state without changing the previous watermark. The acceptance record and manifest are updated, and only an approved decision emits the handover marker. A final human decision is immutable; if the package needs correction, rerun extraction rather than rewriting an accepted batch. Critical extraction/validation failures remain unhanded and may be retried after the underlying problem is fixed.
 
 ## 7.6 Validation Summary
 

@@ -110,3 +110,213 @@ The expected number of records for each batch must match the record counts provi
 - Inventory snapshots and stock movements may contain zero records when the source dataset does not provide the necessary information.
 - Annual stock-in quantities must not automatically be interpreted as supplier purchases.
 - Data types and numerical precision must match the approved Transformation Stage data contract. Incompatible values must be rejected rather than silently converted.
+
+## 2. Target Tables and Column Specification
+
+The target tables are based on the approved output datasets identified in the Transformation Stage. These tables support inventory monitoring, sales analysis, product demand analysis, and stock movement reporting.
+
+### 2.1 Target Table Overview
+
+| Table Name | Table Type | Primary Key | Foreign Keys | Purpose |
+| --- | --- | --- | --- | --- |
+| dim_product | Dimension | product_id | None | Stores product information and attributes for inventory and sales analysis. |
+| dim_order | Dimension | order_id | None | Stores order information, dates, statuses, and reported transaction amounts. |
+| fact_order_item | Fact | order_item_id | order_id, product_id | Stores individual order items, quantities, and transaction values. |
+| fact_inventory_snapshot | Fact | inventory_id | product_id | Stores the latest available inventory quantities and stock levels. |
+| fact_stock_movement | Fact | movement_id | product_id | Stores recorded inward and outward stock movements. |
+| agg_monthly_product_demand | Aggregate | order_month, product_id | product_id | Stores monthly product demand and movement classification. |
+| agg_monthly_order_sales | Aggregate | order_month | None | Stores monthly sales amounts and order counts. |
+| agg_monthly_product_movement | Aggregate | movement_month, product_id | product_id | Stores monthly inward and outward product quantities. |
+| agg_annual_stock_in | Aggregate | movement_year, product_id | product_id | Stores annual inward stock quantities. |
+
+### 2.2 Column Specifications
+
+#### dim_product
+
+| Column Name | Data Type | Constraint |
+| --- | --- | --- |
+| product_id | INTEGER | PRIMARY KEY, NOT NULL |
+| product_name | VARCHAR | NOT NULL, nonblank |
+| category | VARCHAR | Nullable |
+| unit_price | DECIMAL(12,2) | NOT NULL, CHECK >= 0 |
+| reorder_level | INTEGER | Nullable, CHECK >= 0 |
+| product_status | VARCHAR | Nullable |
+| updated_at | TIMESTAMP | Nullable |
+| batch_id | TEXT | NOT NULL |
+| loaded_at | TIMESTAMPTZ | NOT NULL, DEFAULT CURRENT_TIMESTAMP |
+
+**Reason for Inclusion:** Provides product reference information required by inventory, sales, demand, and stock movement datasets.
+
+#### dim_order
+
+| Column Name | Data Type | Constraint |
+| --- | --- | --- |
+| order_id | INTEGER | PRIMARY KEY, NOT NULL |
+| customer_id | INTEGER | Nullable |
+| order_date | DATE | NOT NULL |
+| order_status | VARCHAR | NOT NULL |
+| reported_total_amount | DECIMAL(12,2) | Nullable, CHECK >= 0 |
+| batch_id | TEXT | NOT NULL |
+| loaded_at | TIMESTAMPTZ | NOT NULL, DEFAULT CURRENT_TIMESTAMP |
+
+**Reason for Inclusion:** Provides order-level information required for transaction reporting and order-item analysis.
+
+#### fact_order_item
+
+| Column Name | Data Type | Constraint |
+| --- | --- | --- |
+| order_item_id | INTEGER | PRIMARY KEY, NOT NULL |
+| order_id | INTEGER | FOREIGN KEY, NOT NULL |
+| product_id | INTEGER | FOREIGN KEY, NOT NULL |
+| order_date | DATE | NOT NULL |
+| order_status | VARCHAR | NOT NULL |
+| quantity | INTEGER | NOT NULL, CHECK > 0 |
+| unit_price | DECIMAL(12,2) | NOT NULL, CHECK >= 0 |
+| line_amount | DECIMAL(12,2) | NOT NULL, CHECK >= 0 |
+| batch_id | TEXT | NOT NULL |
+| loaded_at | TIMESTAMPTZ | NOT NULL, DEFAULT CURRENT_TIMESTAMP |
+
+**Foreign Key Relationships:**
+
+- order_id references dim_order(order_id).
+- product_id references dim_product(product_id).
+
+**Reason for Inclusion:** Supports item-level sales analysis, product demand monitoring, and transaction reporting.
+
+#### fact_inventory_snapshot
+
+| Column Name | Data Type | Constraint |
+| --- | --- | --- |
+| inventory_id | INTEGER | PRIMARY KEY, NOT NULL |
+| product_id | INTEGER | FOREIGN KEY, NOT NULL |
+| quantity_on_hand | INTEGER | NOT NULL, CHECK >= 0 |
+| reorder_level | INTEGER | Nullable, CHECK >= 0 |
+| last_updated | TIMESTAMP | Nullable |
+| stock_level | VARCHAR | Nullable |
+| batch_id | TEXT | NOT NULL |
+| loaded_at | TIMESTAMPTZ | NOT NULL, DEFAULT CURRENT_TIMESTAMP |
+
+**Foreign Key Relationship:**
+
+- product_id references dim_product(product_id).
+
+**Reason for Inclusion:** Provides the latest available inventory state for monitoring stock availability and stock levels.
+
+#### fact_stock_movement
+
+| Column Name | Data Type | Constraint |
+| --- | --- | --- |
+| movement_id | INTEGER | PRIMARY KEY, NOT NULL |
+| product_id | INTEGER | FOREIGN KEY, NOT NULL |
+| movement_date | TIMESTAMP | NOT NULL |
+| movement_month | CHAR(7) | NOT NULL, YYYY-MM |
+| movement_year | INTEGER | NOT NULL |
+| movement_direction | VARCHAR | NOT NULL, IN or OUT |
+| quantity | INTEGER | NOT NULL, CHECK > 0 |
+| reference_id | INTEGER | Nullable |
+| batch_id | TEXT | NOT NULL |
+| loaded_at | TIMESTAMPTZ | NOT NULL, DEFAULT CURRENT_TIMESTAMP |
+
+**Foreign Key Relationship:**
+
+- product_id references dim_product(product_id).
+
+**Reason for Inclusion:** Supports the analysis of recorded incoming and outgoing inventory movements.
+
+#### agg_monthly_product_demand
+
+| Column Name | Data Type | Constraint |
+| --- | --- | --- |
+| order_month | CHAR(7) | NOT NULL, YYYY-MM |
+| product_id | INTEGER | FOREIGN KEY, NOT NULL |
+| quantity_sold | INTEGER | NOT NULL, CHECK >= 0 |
+| movement_class | VARCHAR | Nullable |
+| batch_id | TEXT | NOT NULL |
+| loaded_at | TIMESTAMPTZ | NOT NULL, DEFAULT CURRENT_TIMESTAMP |
+
+**Composite Primary Key:** order_month, product_id
+
+**Foreign Key Relationship:**
+
+- product_id references dim_product(product_id).
+
+**Reason for Inclusion:** Provides monthly historical product demand and movement classification for downstream business analysis and forecasting.
+
+#### agg_monthly_order_sales
+
+| Column Name | Data Type | Constraint |
+| --- | --- | --- |
+| order_month | CHAR(7) | PRIMARY KEY, NOT NULL, YYYY-MM |
+| order_count | INTEGER | NOT NULL, CHECK >= 0 |
+| sales_amount | DECIMAL(12,2) | NOT NULL, CHECK >= 0 |
+| batch_id | TEXT | NOT NULL |
+| loaded_at | TIMESTAMPTZ | NOT NULL, DEFAULT CURRENT_TIMESTAMP |
+
+**Reason for Inclusion:** Supports the analysis of monthly sales performance and transaction trends.
+
+#### agg_monthly_product_movement
+
+| Column Name | Data Type | Constraint |
+| --- | --- | --- |
+| movement_month | CHAR(7) | NOT NULL, YYYY-MM |
+| product_id | INTEGER | FOREIGN KEY, NOT NULL |
+| quantity_in | INTEGER | NOT NULL, CHECK >= 0 |
+| quantity_out | INTEGER | NOT NULL, CHECK >= 0 |
+| batch_id | TEXT | NOT NULL |
+| loaded_at | TIMESTAMPTZ | NOT NULL, DEFAULT CURRENT_TIMESTAMP |
+
+**Composite Primary Key:** movement_month, product_id
+
+**Foreign Key Relationship:**
+
+- product_id references dim_product(product_id).
+
+**Reason for Inclusion:** Supports monthly monitoring of incoming and outgoing product quantities.
+
+#### agg_annual_stock_in
+
+| Column Name | Data Type | Constraint |
+| --- | --- | --- |
+| movement_year | INTEGER | NOT NULL |
+| product_id | INTEGER | FOREIGN KEY, NOT NULL |
+| quantity_in | INTEGER | NOT NULL, CHECK >= 0 |
+| batch_id | TEXT | NOT NULL |
+| loaded_at | TIMESTAMPTZ | NOT NULL, DEFAULT CURRENT_TIMESTAMP |
+
+**Composite Primary Key:** movement_year, product_id
+
+**Foreign Key Relationship:**
+
+- product_id references dim_product(product_id).
+
+**Reason for Inclusion:** Provides an annual summary of recorded inward material quantities for inventory planning.
+
+### 2.3 Indexes and Partitions
+
+PostgreSQL automatically creates unique indexes for primary keys. Additional indexes are proposed for frequently accessed foreign keys and reporting columns.
+
+| Table | Proposed Index |
+| --- | --- |
+| fact_order_item | order_id, product_id, order_date |
+| fact_inventory_snapshot | product_id |
+| fact_stock_movement | product_id, movement_date |
+| agg_monthly_product_demand | product_id |
+| agg_monthly_product_movement | product_id |
+| agg_annual_stock_in | product_id |
+| All target tables | batch_id |
+
+Table partitioning is not initially required because the actual analytical data volume must first be evaluated.
+
+### 2.4 Match Keys, Batch Identification, and History
+
+The primary keys and composite primary keys serve as the match keys of the target tables.
+
+The batch_id column identifies the batch responsible for loading the current target records, while loaded_at records the loading timestamp.
+
+The dimension tables follow an SCD Type 1-style strategy, where previous attribute values are replaced by the latest approved values.
+
+SCD Type 2 is not implemented. Therefore, effective_from, effective_to, and is_current columns are not required.
+
+The inventory snapshot table represents the latest available inventory state rather than a history of daily inventory snapshots.
+
+All data types must be verified against the approved Transformation Stage contract before implementation to prevent numerical precision loss or incompatible data conversion.

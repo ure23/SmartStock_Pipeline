@@ -429,3 +429,79 @@ Pre-load validation ensures that the target database and approved transformed da
 - A proposed storage reserve of 20% must be considered when evaluating available database capacity.
 
 Only batches that satisfy the pre-load requirements are allowed to proceed to the loading process.
+
+## 5. Post-Load Validation and Reconciliation
+
+Post-load validation ensures that the records written to the target database are complete, accurate, and consistent with the approved transformed datasets.
+
+All critical post-load checks must be performed within the same database transaction before the batch is committed and made available for reporting.
+
+| Check ID | Check Name | Target | Purpose | Validation Criteria | Severity |
+| --- | --- | --- | --- | --- | --- |
+| L-POST-01 | Record Reconciliation | All target tables | Detect missing or additional records | Records received = records loaded + records rejected; rejected records must equal zero for an accepted batch | Critical |
+| L-POST-02 | Target Row Count | All target tables | Verify that all expected records are loaded | Target row count equals the approved input record count | Critical |
+| L-POST-03 | Primary Key Uniqueness | All primary and composite keys | Prevent duplicate records | Duplicate key count = 0 | Critical |
+| L-POST-04 | Referential Integrity | Fact and aggregate tables | Prevent orphan records | All required foreign keys match existing dimension records | Critical |
+| L-POST-05 | Required Field Null Check | Required target columns | Ensure data completeness | Required null value count = 0 | Critical |
+| L-POST-06 | Amount Reconciliation | Order totals, item amounts, and monthly sales | Verify monetary accuracy | Target monetary totals equal their corresponding transformed input totals | Critical |
+| L-POST-07 | Quantity Reconciliation | Order items, inventory, stock movements, and aggregates | Verify quantity accuracy | Target quantity totals equal their corresponding transformed input totals | Critical |
+| L-POST-08 | Key and Value Comparison | All target business columns | Detect missing, additional, or incorrect values | All business keys and values match the staged transformed input | Critical |
+| L-POST-09 | Load Error Check | Load logs and database transaction | Ensure loading completed without errors | Unresolved errors, constraint violations, and interruptions equal zero | Critical |
+| L-POST-10 | Optional Field Null Check | Nullable target columns | Identify unexpected missing values | Null rates remain within the approved Transformation Stage expectations | Non-critical |
+| L-POST-11 | Load Duration Check | Load execution time | Monitor loading performance | Warning at 20 minutes; abort if the 30-minute deadline is exceeded | Non-critical / Critical |
+
+### 5.1 Record Reconciliation Rules
+
+The following formulas are used to verify record completeness and consistency for each target table.
+
+**Record Reconciliation:**
+
+    Records Received = Records Loaded + Records Rejected
+
+**Logical Load Reconciliation:**
+
+    Records Loaded = Records Inserted + Records Updated + Records Unchanged
+
+**Full Snapshot Reconciliation:**
+
+    Target Record Count After Load = Records Loaded
+
+**Target Record Count Reconciliation:**
+
+    Target Count Before Load + Records Inserted - Records Deleted
+    = Target Count After Load
+
+Inserted, updated, unchanged, and deleted records are logical classifications based on comparison with the previous accepted snapshot.
+
+Because the Load Stage uses full snapshot replacement, all accepted input records are physically inserted again, including records whose business values have not changed.
+
+Only records rejected during the Load Stage are counted as load rejections. Records already excluded or rejected during the Transformation Stage must not be counted again.
+
+For interrupted or failed batches, rejected, unprocessed, and rolled-back records must be documented separately. Committed record counts are zero when the entire transaction is rolled back.
+
+### 5.2 Aggregate Reconciliation
+
+| Target Table | Validation Measure |
+| --- | --- |
+| dim_order | SUM(reported_total_amount) |
+| fact_order_item | SUM(quantity), SUM(line_amount) |
+| fact_inventory_snapshot | SUM(quantity_on_hand) |
+| fact_stock_movement | SUM(quantity) |
+| agg_monthly_product_demand | SUM(quantity_sold) |
+| agg_monthly_order_sales | SUM(order_count), SUM(sales_amount) |
+| agg_monthly_product_movement | SUM(quantity_in), SUM(quantity_out) |
+| agg_annual_stock_in | SUM(quantity_in) |
+
+Each aggregate measure must be compared with its corresponding approved transformed input. Monetary comparisons must preserve decimal precision.
+
+Reported order totals and order-item line amounts must be reconciled separately because they are not necessarily equivalent.
+
+### 5.3 Validation Handling
+
+If any critical post-load validation check fails, the entire batch must be rolled back and marked as rejected.
+
+If a non-critical warning occurs, the batch must be held for manual review before publication.
+
+No additional data cleaning or business transformation must be performed during the Load Stage. Identified issues must be reported to the appropriate stage for correction.
+
+**Actual Validation Results:** Pending implementation and execution of the Load Stage.

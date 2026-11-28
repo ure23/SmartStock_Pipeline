@@ -582,3 +582,69 @@ Successful batch metadata must be committed together with the target database ch
 | Performance Monitoring | Supports the evaluation of loading duration and resource requirements. |
 
 Load metadata and logs must not contain database passwords, API keys, or unnecessary confidential client information.
+
+## 7. Log Retention, Rejected Data, and Access
+
+Load logs and rejected records must be retained to support pipeline monitoring, troubleshooting, auditing, and recovery. Access to these records must be restricted to authorized personnel.
+
+### 7.1 Log Retention and Storage
+
+| Record Type | Retention Period | Storage Location | Justification |
+| --- | --- | --- | --- |
+| Operational Load Logs | At least 30 days | pipeline/logs/load/ | Supports monitoring and troubleshooting of recent loading activities. |
+| Detailed Validation and Audit Logs | At least 90 days | pipeline_audit schema | Provides evidence of validation, reconciliation, and batch acceptance. |
+| Rejected Records | At least 30 days | pipeline/quarantine/load/ | Allows investigation and correction of loading-related errors. |
+| Committed Batch Registry | Lifetime of the warehouse and its recoverable backups | pipeline_audit.committed_batches | Maintains batch traceability and prevents duplicate loading. |
+| Approved Transformation Files | Until recovery and retention requirements are satisfied | Restricted transformation handover directory | Supports recovery and rerunning of failed batches. |
+
+Records involved in unresolved incidents, audits, or recovery activities must be retained beyond their normal retention period when necessary.
+
+### 7.2 Rejected Data Management
+
+Records rejected during loading must be stored in the designated quarantine directory.
+
+Each rejected record must include the following information:
+
+- Load run ID
+- Transformation run ID
+- Batch ID
+- Target table name
+- Record identifier or match key
+- Rejection reason
+- Error code or error message
+- Rejection timestamp
+- Reference to the approved input record
+
+Rejected records must not be included in the published target database.
+
+Issues involving invalid business values or incompatible transformed data must be returned to the Transformation Stage for correction and approval.
+
+### 7.3 Access Permissions
+
+| Role | Read Access | Write Access | Delete Access |
+| --- | --- | --- | --- |
+| Pipeline Loader | Required target and audit records | Target records and load logs | Target replacement only |
+| Project Developer | Authorized logs and rejected records | Authorized maintenance activities | No |
+| Database Administrator | Yes | Yes | Yes, subject to retention policies |
+| Data Quality Reviewer | Validation logs and rejected records | Manual review decisions | No |
+| Reporting User | Published warehouse tables only | No | No |
+
+Database credentials and confidential client information must not be exposed in public repositories or unrestricted log files.
+
+### 7.4 Archiving and Deletion Rules
+
+- Logs and rejected records must not be deleted before their retention periods expire.
+- Records required for ongoing troubleshooting, auditing, or recovery must remain available.
+- Important audit records and approved handover metadata must be archived securely when necessary.
+- Expired records may only be deleted by the designated administrator through an approved cleanup process.
+- Logs, rejected records, and database backups must be stored outside the public GitHub repository.
+
+### 7.5 Backup and Recovery
+
+A PostgreSQL database backup must be created before the initial loading process, major schema changes, or major data refreshes when required.
+
+The backup must include the corresponding warehouse and committed-batch registry information.
+
+Ordinary loading failures are handled through transaction rollback, which preserves the previous accepted warehouse snapshot.
+
+Database backups provide additional protection against database corruption, storage failure, or issues discovered after a successful commit.

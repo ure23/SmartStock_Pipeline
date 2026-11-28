@@ -801,3 +801,27 @@ The previous accepted warehouse snapshot must remain available if the current ba
 | Overall Load | PENDING IMPLEMENTATION |
 
 The validation summary will be updated with actual results once the Load Stage has been implemented and executed.
+
+## 9. Common Load Problems and Mitigation
+
+The SmartStock Pipeline may encounter loading issues related to database connectivity, transformed data completeness, target constraints, batch execution, and storage availability.
+
+The following table presents possible loading problems, their causes, potential impacts, and proposed mitigation strategies.
+
+| Problem | Possible Cause | Impact | Proposed Mitigation |
+| --- | --- | --- | --- |
+| Duplicate Records After Rerun | The same batch is loaded multiple times without checking its previous execution status. | Duplicate records may result in inflated sales, inventory, and demand totals. | Check the committed-batch registry, enforce unique primary keys, and use transactional full snapshot replacement. |
+| Foreign Key Violation | Fact or aggregate records are loaded before their corresponding dimension records, or required dimension records are missing. | Loading may fail or produce invalid analytical relationships. | Validate foreign keys before loading and load dimension tables before dependent fact and aggregate tables. |
+| Partial Data Load | Database interruption or application failure occurs before all tables are successfully loaded. | The target database may contain incomplete or inconsistent records. | Perform all target changes within one database transaction and roll back the entire batch when a failure occurs. |
+| Schema Mismatch | The transformed dataset contains unexpected columns, missing fields, or incompatible data types. | Loading may fail or result in inaccurate target values. | Validate the input schema and approved data contract before loading. Reject incompatible datasets. |
+| Incomplete Snapshot | Incremental-only data is incorrectly treated as a complete cumulative snapshot. | Existing historical records may be unintentionally removed during full refresh. | Require a complete cumulative snapshot declaration and validate the input manifest before replacing target data. |
+| Outdated Aggregate Records | Late-arriving orders, corrections, or deleted records are not reflected in the transformed aggregate datasets. | Monthly sales, product demand, and stock movement reports may contain outdated values. | Require corrected aggregate datasets from the Transformation Stage and load only the latest approved batch. |
+| Numerical Precision Loss | Quantity or monetary values exceed the supported target data type or precision. | Sales totals, stock quantities, and analytical results may become inaccurate. | Verify numerical compatibility with the approved schema and reject incompatible values instead of rounding or converting them silently. |
+| Slow Loading Process | Large data volume, inefficient insertion methods, or competing database operations. | Loading may exceed the scheduled completion window and delay reporting. | Use PostgreSQL bulk COPY, appropriate indexes, off-peak scheduling, and a defined execution timeout. |
+| Database Locking | Multiple loading processes or database operations access the same target tables. | Loading may be delayed or interrupted. | Use a PostgreSQL advisory lock and schedule loading during periods of low database activity. |
+| Insufficient Storage | Temporary staging tables, transaction logs, backups, or retained files consume available storage. | Loading may fail due to insufficient disk space. | Check available storage before loading and enforce approved retention and cleanup policies. |
+| Database Connection Failure | PostgreSQL service is unavailable or network connectivity is interrupted. | The scheduled batch cannot be successfully loaded. | Perform connection validation, apply retry rules, and notify the project team if the problem continues. |
+| Missing or Corrupted Input Files | Incomplete handover or corruption of transformed CSV files. | Target records may be incomplete or inaccurate. | Verify the presence of all required files, record counts, and SHA-256 checksums before loading. |
+| Load Logging Failure | The log directory or audit schema is unavailable. | Batch execution cannot be properly monitored, audited, or recovered. | Validate logging permissions and availability before loading, and commit successful audit records with the target transaction. |
+
+These mitigation strategies are intended to ensure the reliability, accuracy, completeness, and recoverability of the SmartStock Load Stage.

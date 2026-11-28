@@ -505,3 +505,80 @@ If a non-critical warning occurs, the batch must be held for manual review befor
 No additional data cleaning or business transformation must be performed during the Load Stage. Identified issues must be reported to the appropriate stage for correction.
 
 **Actual Validation Results:** Pending implementation and execution of the Load Stage.
+
+## 6. Load Metadata and Log Specification
+
+Load metadata and logs are maintained to monitor the loading process, track batch execution, identify errors, and support auditing, troubleshooting, data lineage, and recovery.
+
+The Load Stage records one summary for each execution and detailed metadata for each target table.
+
+### 6.1 Load Metadata Fields
+
+| Field Name | Purpose | Example / Format |
+| --- | --- | --- |
+| run_id | Unique identifier for each load execution | LOAD-<uuid> |
+| transformation_run_id | Identifies the approved transformation run | TRF-20261009-001 |
+| extraction_run_id | Identifies the original extraction run | RUN-<uuid> |
+| batch_id | Identifies the batch being loaded | BATCH-20261009 |
+| batch_window | Identifies the inherited extraction window | initial_baseline or content_changes_since:RUN-<uuid> |
+| table_name | Identifies the target table | warehouse.fact_order_item |
+| load_type | Identifies the loading strategy | FULL |
+| load_start_ts | Records the start of the loading process | ISO 8601 timestamp |
+| load_end_ts | Records the end of the loading process | ISO 8601 timestamp |
+| load_duration_sec | Records the total loading duration in seconds | Nonnegative number |
+| status | Identifies the execution status | STARTED, SUCCESS, FAILED, HELD, SKIPPED |
+| acceptance_status | Identifies the final batch decision | APPROVED, MANUAL REVIEW, REJECTED, NOT APPLICABLE |
+| records_received | Number of records received from transformation | Integer |
+| records_loaded | Number of successfully committed input records | Integer |
+| records_inserted | Number of new business keys | Integer |
+| records_updated | Number of existing records with changed values | Integer |
+| records_unchanged | Number of existing records with unchanged business values | Integer |
+| records_deleted | Number of previous target records removed | Integer |
+| physical_rows_written | Number of records physically inserted during loading | Integer |
+| records_rejected | Number of records rejected during loading | Integer |
+| records_unprocessed | Number of records not processed due to failure | Integer |
+| records_rolled_back | Number of tentative records rolled back | Integer |
+| target_count_before | Target table record count before loading | Integer |
+| target_count_after | Target table record count after loading | Integer |
+| pre_load_result | Result of pre-load validation | PASS, WARNING, FAIL, NOT RUN |
+| post_load_result | Result of post-load validation | PASS, WARNING, FAIL, NOT RUN |
+| validation_details | Detailed validation and reconciliation evidence | JSON |
+| error_code | Identifies the loading error | SQLSTATE or NULL |
+| error_message | Describes the encountered error | Error description or NULL |
+| load_code_version | Identifies the version of the loading code | Git commit hash or release tag |
+| schema_version | Identifies the approved schema version | Manifest value |
+| manifest_checksum | Verifies the identity and integrity of the input package | SHA-256 |
+| attempt_number | Identifies the batch execution attempt | Positive integer |
+| reviewer | Identifies the person responsible for manual approval | Authorized reviewer or NULL |
+| review_note | Records the justification for a manual decision | Text or NULL |
+
+The values above represent field formats and illustrative examples rather than actual loading results.
+
+### 6.2 Log Storage
+
+The following locations are proposed for storing load metadata and execution logs.
+
+| Log Type | Storage Location |
+| --- | --- |
+| Execution Logs | pipeline/logs/load/<run_id>/ |
+| Load Run Metadata | pipeline_audit.load_runs |
+| Per-Table Load Metadata | pipeline_audit.load_table_log |
+| Committed Batch Registry | pipeline_audit.committed_batches |
+| Validation Results | pipeline/logs/load/<run_id>/ |
+| Rejected Records | pipeline/quarantine/load/<run_id>/ |
+
+Successful batch metadata must be committed together with the target database changes. Failed execution logs must be recorded separately to preserve troubleshooting information after rollback.
+
+### 6.3 Uses of Load Metadata and Logs
+
+| Use | Description |
+| --- | --- |
+| Monitoring | Tracks batch status, loading duration, and record counts. |
+| Troubleshooting | Identifies failed validation checks, database errors, and loading interruptions. |
+| Auditing | Provides evidence of batch execution, validation, and approval. |
+| Data Lineage | Connects loaded records to their original transformation and extraction runs. |
+| Recovery | Identifies the approved input datasets required to rerun a failed batch. |
+| Duplicate Prevention | Identifies previously successful batches and prevents unnecessary reloading. |
+| Performance Monitoring | Supports the evaluation of loading duration and resource requirements. |
+
+Load metadata and logs must not contain database passwords, API keys, or unnecessary confidential client information.

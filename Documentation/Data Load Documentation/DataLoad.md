@@ -398,3 +398,34 @@ Each successful batch is identified by a unique batch ID and manifest checksum r
 - If the database connection fails during commit, the committed-batch registry must be checked before retrying.
 
 These rules ensure that repeated execution of the same batch does not create duplicate data or inconsistent reporting results.
+
+## 4. Pre-Load Validation Checks
+
+Pre-load validation ensures that the target database and approved transformed datasets are ready before the loading process begins. These checks prevent incomplete, invalid, incompatible, or duplicate batches from being written to the target database.
+
+| Check ID | Check Name | Target | Purpose | Validation Criteria | Severity |
+| --- | --- | --- | --- | --- | --- |
+| L-PRE-01 | Target Connection | PostgreSQL database | Ensure the target database is available | Database connection and SELECT 1 succeed within 10 seconds | Critical |
+| L-PRE-02 | Write Permissions | Loader account | Ensure authorized database access | Required SELECT, INSERT, DELETE, temporary table, and audit permissions are available | Critical |
+| L-PRE-03 | Schema Match | All target tables and CSV files | Prevent incompatible column and data type errors | Required columns, keys, data types, and schema versions match the approved contract | Critical |
+| L-PRE-04 | Handover Status | Transformation metadata | Ensure only approved data is loaded | Handover status is APPROVED and batch lineage matches | Critical |
+| L-PRE-05 | Handover Completeness | Transformed CSV files | Prevent incomplete snapshot loading | All nine files are present, declared cumulative, and match their checksums | Critical |
+| L-PRE-06 | Input Record Count | CSV files and manifest | Detect missing or additional records | Actual record counts equal the approved transformation output counts | Critical |
+| L-PRE-07 | Available Storage | Target database and staging storage | Prevent storage-related failures | Available storage is sufficient for staging, target replacement, transaction logs, and metadata | Critical |
+| L-PRE-08 | Duplicate Batch Check | Committed-batch registry | Prevent duplicate or outdated loads | Batch has not been successfully loaded and follows the correct batch sequence | Critical |
+| L-PRE-09 | Key and Required Field Check | Staged datasets | Prevent duplicate keys and missing required values | Duplicate keys and required null values equal zero | Critical |
+| L-PRE-10 | Parent Record Check | Dimension, fact, and aggregate datasets | Prevent foreign key violations | All required foreign keys have corresponding dimension records | Critical |
+| L-PRE-11 | Unexpected Empty Dataset | Transformed datasets | Identify unusual data absence | Unexpected zero-record datasets are flagged for review | Non-critical |
+| L-PRE-12 | Load Lock | PostgreSQL advisory lock | Prevent concurrent warehouse replacement | Exclusive loading lock is successfully acquired | Critical |
+
+### 4.1 Pre-Load Validation Rules
+
+- All critical validation checks must pass before target records are modified.
+- If a critical check fails, the loading process must stop and the failure must be recorded.
+- Non-critical warnings require manual review before publication.
+- A valid zero-record dataset may be accepted if its absence is documented in the approved transformation handover.
+- A missing file must be treated as a critical failure.
+- A previously successful batch with an identical manifest checksum must be skipped instead of loaded again.
+- A proposed storage reserve of 20% must be considered when evaluating available database capacity.
+
+Only batches that satisfy the pre-load requirements are allowed to proceed to the loading process.

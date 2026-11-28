@@ -648,3 +648,156 @@ The backup must include the corresponding warehouse and committed-batch registry
 Ordinary loading failures are handled through transaction rollback, which preserves the previous accepted warehouse snapshot.
 
 Database backups provide additional protection against database corruption, storage failure, or issues discovered after a successful commit.
+
+## 8. Load Acceptance, Rollback, and Completion Rules
+
+Load acceptance rules determine whether a batch can be marked as complete and made available for downstream reporting and analytics.
+
+The acceptance decision is based on the results of pre-load validation, post-load validation, record reconciliation, and load execution.
+
+### 8.1 Decision Rules
+
+| Validation Condition | Acceptance Criteria | Acceptance Decision | Pipeline Action | Decision Type | Responsible Role |
+| --- | --- | --- | --- | --- | --- |
+| All validation checks pass | All critical checks pass, record counts reconcile, and no records are rejected | APPROVED | Commit the transaction, record the successful batch, and publish the data | Automatic | Pipeline Loader |
+| Non-critical warning | All critical checks pass but one or more non-critical warnings exist | MANUAL REVIEW | Hold publication and request manual review | Manual | Project Lead or Data Quality Reviewer |
+| Critical validation failure | One or more critical checks fail | REJECTED | Roll back the transaction, record the failure, and notify the project team | Automatic | Pipeline Loader |
+| Record reconciliation failure | Loaded records or aggregate values do not match the approved input | REJECTED | Roll back the entire batch and investigate the discrepancy | Automatic | Pipeline Loader and Project Developer |
+| Temporary database failure | Database connection or locking issue prevents completion | FAILED | Retry within the approved retry limit | Automatic | Pipeline Loader |
+| Duplicate successful batch | Batch ID and manifest checksum match a previously successful load | SKIPPED | Skip loading and record the duplicate batch attempt | Automatic | Pipeline Loader |
+| Incompatible schema | Incoming columns or data types do not match the approved target contract | REJECTED | Stop loading and request correction | Automatic | Project Developer |
+
+### 8.2 Automatic Approval
+
+A batch is automatically approved when the following conditions are satisfied:
+
+- The Transformation Stage handover status is APPROVED.
+- All critical pre-load validation checks pass.
+- All expected target tables are successfully loaded.
+- Target record counts match the approved transformed input counts.
+- Record reconciliation is successful.
+- No duplicate primary keys or invalid foreign keys exist.
+- Required target columns contain no missing values.
+- Monetary amounts and quantity totals match the approved transformed datasets.
+- No records are rejected during loading.
+- No unresolved errors or warnings exist.
+- The batch completes within the approved loading window.
+
+After these conditions are satisfied, the transaction is committed and the batch is marked as SUCCESS and APPROVED.
+
+### 8.3 Manual Review
+
+Manual review is required when one or more non-critical warnings are identified, including:
+
+- Unexpected empty datasets.
+- Unexpected missing values in optional columns.
+- Loading duration exceeding the proposed warning threshold.
+- Other non-critical issues that require confirmation before publication.
+
+The project lead or designated data quality reviewer must evaluate the warning and record the following information:
+
+- Reviewer identity
+- Review timestamp
+- Validation warning
+- Review decision
+- Justification for approval or rejection
+
+The batch must not be published while the review remains unresolved.
+
+If tentative target changes have already been made, the transaction must be rolled back while review is pending.
+
+An approved warning must be documented, and all critical validation checks must be repeated before publication.
+
+Manual approval must not override critical validation failures.
+
+### 8.4 Rejection and Rollback
+
+A batch must be rejected if any of the following conditions occur:
+
+- The Transformation Stage handover is not approved.
+- One or more required transformed files are missing.
+- The incoming dataset does not match the approved schema.
+- Duplicate primary keys are detected.
+- Required foreign key relationships are invalid.
+- Required data values are missing.
+- Record reconciliation fails.
+- Monetary or quantity totals do not match the approved input.
+- A critical database error or constraint violation occurs.
+- The batch exceeds the maximum approved loading duration.
+
+If a failure occurs, the pipeline must:
+
+1. Roll back the entire database transaction.
+2. Preserve the previous successfully loaded dataset.
+3. Record the failure in the load logs.
+4. Store rejected records and related error information when applicable.
+5. Notify the project developer or database administrator.
+6. Resolve the identified issue before attempting another load.
+
+### 8.5 Retry Rules
+
+Retries are permitted only for temporary technical failures, such as database connection interruptions or temporary database locks.
+
+| Retry Attempt | Waiting Time | Pipeline Action |
+| --- | --- | --- |
+| Initial Attempt | None | Execute the scheduled loading process. |
+| Retry 1 | 5 minutes | Retry using the same approved transformed datasets. |
+| Retry 2 | 10 minutes | Perform the final automatic retry. |
+| After Retry Limit | Not applicable | Mark the batch as FAILED and notify the project team. |
+
+The maximum number of automatic retries is two after the initial attempt.
+
+Retries must remain within the approved loading window. If insufficient time remains, the loading process must be deferred and reported to the project team.
+
+Invalid data, missing files, and incompatible schemas must not be automatically retried without correction.
+
+If the connection is interrupted during commit, the committed-batch registry must be checked before retrying to determine whether the previous transaction succeeded.
+
+### 8.6 Completion and Handover
+
+After a batch is successfully committed, the Load Stage must generate a completion report containing the following information:
+
+- Load run ID
+- Transformation run ID
+- Extraction run ID
+- Batch ID and batch window
+- Target tables successfully loaded
+- Total records received
+- Total records loaded
+- Total records inserted
+- Total records updated
+- Total records unchanged
+- Total records deleted
+- Total records rejected
+- Pre-load and post-load validation results
+- Load start and completion timestamps
+- Total loading duration
+- Load code and schema versions
+- Final batch status
+- Final acceptance decision
+- Available reporting datasets
+
+The project team, designated data owner, and downstream reporting users must be notified through the approved notification channel, such as email or an internal pipeline notification.
+
+The previous accepted warehouse snapshot must remain available if the current batch fails or requires manual review.
+
+### 8.7 Validation Summary
+
+| Validation Component | Current Result |
+| --- | --- |
+| Pre-Load Validation | NOT YET TESTED |
+| dim_product Load | NOT YET TESTED |
+| dim_order Load | NOT YET TESTED |
+| fact_order_item Load | NOT YET TESTED |
+| fact_inventory_snapshot Load | NOT YET TESTED |
+| fact_stock_movement Load | NOT YET TESTED |
+| agg_monthly_product_demand Load | NOT YET TESTED |
+| agg_monthly_order_sales Load | NOT YET TESTED |
+| agg_monthly_product_movement Load | NOT YET TESTED |
+| agg_annual_stock_in Load | NOT YET TESTED |
+| Record Reconciliation | NOT YET TESTED |
+| Aggregate Reconciliation | NOT YET TESTED |
+| Rollback and Idempotency | NOT YET TESTED |
+| Overall Load | PENDING IMPLEMENTATION |
+
+The validation summary will be updated with actual results once the Load Stage has been implemented and executed.

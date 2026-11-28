@@ -320,3 +320,81 @@ SCD Type 2 is not implemented. Therefore, effective_from, effective_to, and is_c
 The inventory snapshot table represents the latest available inventory state rather than a history of daily inventory snapshots.
 
 All data types must be verified against the approved Transformation Stage contract before implementation to prevent numerical precision loss or incompatible data conversion.
+
+## 3. Load Strategy and Rules
+
+### 3.1 Load Type and Write Logic
+
+The SmartStock Pipeline uses incremental extraction in Stage 1. However, the proposed Load Stage uses a full snapshot refresh to ensure that the target database reflects the complete and latest approved transformed datasets.
+
+This strategy also prevents outdated records and historical aggregates from remaining in the target database after upstream corrections or deletions.
+
+| Target Table | Load Type | Write Logic | Match Key | On Failure |
+| --- | --- | --- | --- | --- |
+| dim_product | Full | Replace, SCD Type 1-style | product_id | Roll back batch |
+| dim_order | Full | Replace, SCD Type 1-style | order_id | Roll back batch |
+| fact_order_item | Full | Delete and reload | order_item_id | Roll back batch |
+| fact_inventory_snapshot | Full | Replace latest snapshot | inventory_id | Roll back batch |
+| fact_stock_movement | Full | Delete and reload | movement_id | Roll back batch |
+| agg_monthly_product_demand | Full | Replace aggregate records | order_month, product_id | Roll back batch |
+| agg_monthly_order_sales | Full | Replace aggregate records | order_month | Roll back batch |
+| agg_monthly_product_movement | Full | Replace aggregate records | movement_month, product_id | Roll back batch |
+| agg_annual_stock_in | Full | Replace aggregate records | movement_year, product_id | Roll back batch |
+
+All approved transformed records are loaded into temporary staging tables before the existing target records are replaced.
+
+Match keys are used to identify new, updated, unchanged, and deleted records relative to the previous accepted snapshot.
+
+### 3.2 Handling of Changing Data
+
+| Condition | Handling Rule |
+| --- | --- |
+| New records | Include the new records in the approved snapshot and load them into the target tables. |
+| Updated records | Replace previous values with the latest approved transformed values. |
+| Deleted records | Remove records that are no longer present in the complete approved snapshot. |
+| Inactive records | Preserve the product or order status provided by the Transformation Stage. |
+| Late-arriving records | Load the corrected records and historical aggregates prepared by the Transformation Stage. |
+| Schema mismatch | Reject incompatible schemas and notify the project team. |
+| Missing dimension records | Reject the batch and request correction from the Transformation Stage. |
+
+The Load Stage must not modify business values, perform new data cleaning, or recalculate analytical measures.
+
+### 3.3 Load Order and Dependencies
+
+The loading process follows the sequence below:
+
+1. Validate the approved Transformation Stage handover.
+2. Load the transformed datasets into temporary staging tables.
+3. Validate the staged records and their relationships.
+4. Delete existing dependent aggregate and fact records.
+5. Delete existing dimension records.
+6. Load dim_product and dim_order.
+7. Load the fact tables.
+8. Load the aggregate tables.
+9. Perform post-load validation and reconciliation.
+10. Commit the transaction and mark the batch as complete.
+
+Dimension tables must be loaded before dependent fact and aggregate tables to prevent foreign key violations.
+
+### 3.4 Transaction and Rollback Handling
+
+All target table changes must be performed within a single PostgreSQL database transaction.
+
+A database advisory lock must prevent multiple loaders from replacing the warehouse simultaneously.
+
+If any critical validation check or SQL operation fails, the entire transaction must be rolled back. The previous successfully loaded dataset must remain available in the target database.
+
+The failure details must be recorded separately in the load logs after rollback.
+
+### 3.5 Rerun and Idempotency
+
+Each successful batch is identified by a unique batch ID and manifest checksum recorded in the committed-batch registry.
+
+- A batch that has already been successfully loaded with the same checksum must be skipped.
+- A failed batch may be rerun using the same approved transformed files and a new load run ID.
+- Full snapshot replacement prevents duplicate records and inflated analytical totals.
+- An older batch must not overwrite a newer successfully loaded batch.
+- A modified handover for an already successful batch requires a new approved correction batch ID.
+- If the database connection fails during commit, the committed-batch registry must be checked before retrying.
+
+These rules ensure that repeated execution of the same batch does not create duplicate data or inconsistent reporting results.
